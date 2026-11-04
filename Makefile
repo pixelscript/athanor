@@ -1,0 +1,68 @@
+# =============================================================================
+# Athanor — performance end-of-chain effect for Hermetic Modular Alchemy Lab
+#
+# Built on alchemy-template (standard Daisy workflow, libDaisy core Makefile):
+#   make libdaisy       — build lib/libDaisy once after cloning
+#   make                — build firmware → build/athanor.bin
+#   make program-dfu    — flash over USB (module in DFU mode: hold B3 at boot)
+#   make program-live   — reboot the running module over USB and flash it
+#   make clean          — remove the build tree
+# =============================================================================
+
+TARGET = athanor
+
+# Athanor uses V2-only hardware (J3 as a calibrated CV input).
+BOARD = v2
+
+ALCHEMY_DIR  = lib/alchemy-sdk
+LIBDAISY_DIR = lib/libDaisy
+
+# ── App sources ─────────────────────────────────────────────────────────────
+CPP_SOURCES = \
+    src/athanor.cpp \
+    src/stretch_engine.cpp \
+    src/fx.cpp \
+    src/age.cpp \
+    src/drive.cpp \
+    src/modfx.cpp \
+    src/crashlog.cpp
+
+# ── Alchemy SDK, compiled straight from the submodule ───────────────────────
+CPP_SOURCES += $(sort $(shell find $(ALCHEMY_DIR)/framework/src -name '*.cpp'))
+CPP_SOURCES += $(sort $(wildcard $(ALCHEMY_DIR)/hardware/alchemy-lab/$(BOARD)/src/*.cpp))
+
+C_INCLUDES += \
+    -Isrc \
+    -Idsp \
+    -I$(ALCHEMY_DIR)/framework/include \
+    -I$(ALCHEMY_DIR)/hardware/include \
+    -I$(ALCHEMY_DIR)/hardware/alchemy-lab/$(BOARD)/include
+
+C_DEFS += -DALCHEMY_BOARD_V2
+
+# Capicola's engine needs real optimisation to fit the audio budget.
+OPT = -O2
+
+# ── Daisy bootloader build (BOOT_SRAM) ──────────────────────────────────────
+APP_TYPE = BOOT_SRAM
+# Local copy of the SDK script + a .d2_bss section (reverb in internal SRAM).
+LDSCRIPT = athanor.lds
+
+# The Alchemy SDK requires C++17 (libDaisy's default is gnu++14).
+CPP_STANDARD = -std=gnu++17
+
+# ── libDaisy core Makefile does the rest ────────────────────────────────────
+SYSTEM_FILES_DIR = $(LIBDAISY_DIR)/core
+include $(SYSTEM_FILES_DIR)/Makefile
+
+.PHONY: libdaisy
+libdaisy:
+	$(MAKE) -C $(LIBDAISY_DIR)
+
+# ── Flash without touching the module ───────────────────────────────────────
+USBPID ?= df11
+
+.PHONY: program-live
+program-live: all
+	node $(ALCHEMY_DIR)/tools/hostlink-cli/hostlink.mjs reboot bootloader
+	dfu-util -w -a 0 -s $(FLASH_ADDRESS):leave -D $(BUILD_DIR)/$(TARGET_BIN) -d ,0483:$(USBPID)
