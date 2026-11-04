@@ -64,7 +64,7 @@ private:
         if (envFast > 2.5f * envSlow + 0.01f) { onsetHold = 2400; return true; }   // 50 ms hold-off
         return false;
     }
-    bool guards = true;   // Athanor: transient guard + aligned splices (off = stock Capicola)
+    bool guards;          // Athanor: transient guard + aligned splices (off = stock Capicola)
     void AttachOnsets() {
         for (auto& g : granule) {
             g.SetTransients(guards ? &onsets : nullptr);
@@ -227,6 +227,7 @@ public:
         onsets.Clear();
         envFast = envSlow = 0.0f;
         onsetHold = 0;
+        guards = true;
         AttachOnsets();
 
         curPitch     = 1.0f;

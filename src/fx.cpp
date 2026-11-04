@@ -60,7 +60,10 @@ void Plate::Init(float sr, float* mem)
         len_d1_[i] = S(d1[i]);
         InitLine(tank_d1_[i], a, len_d1_[i]);
         tank_ap2_[i].len = S(ap2[i]);
-        InitLine(tank_ap2_[i].d, a, tank_ap2_[i].len);
+        /* Dattorro's left output taps the first 1800-sample allpass at
+         * 1913, past its own length. Size the line to cover the tap, or the
+         * read wraps into the neighbouring buffer and clicks. */
+        InitLine(tank_ap2_[i].d, a, (uint32_t)((i == 0 ? 1913.f : ap2[i]) * scale_ + 0.5f) + 8u);
         len_d2_[i] = S(d2[i]);
         InitLine(tank_d2_[i], a, len_d2_[i]);
     }
@@ -161,6 +164,7 @@ void Space::Init(float sr, float* plate_mem, float* dly_l, float* dly_r)
 {
     sr_ = sr;
     plate_.Init(sr, plate_mem);
+    rev_hp_.SetHz(150.0f, sr);
     plate_.SetDecay(0.6f);
     plate_.SetDamping(0.3f);
     dl_[0].Init(dly_l, kDelayFloats);
@@ -245,7 +249,8 @@ void Space::Process(float* l, float* r, std::size_t n)
         dl_[1].Write(LoopClip(r[i] * ds + fr * fb));
 
         /* Plate: mono-summed send plus the echoes (in delay mode). */
-        const float rin = 0.5f * (l[i] + r[i]) * rs + 0.25f * (yl + yr) * dtr;
+        float rin = 0.5f * (l[i] + r[i]) * rs + 0.25f * (yl + yr) * dtr;
+        rin -= rev_hp_.Tick(rin);   // low cut into the plate: no boomy build-up
         float rl, rr;
         plate_.Tick(rin, rl, rr);
 

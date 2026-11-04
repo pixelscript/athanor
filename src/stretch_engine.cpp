@@ -4,6 +4,8 @@
  */
 #include "stretch_engine.h"
 
+#include <type_traits>
+
 #include "daisy_seed.h"
 #include "KeyframeRecorder.h"
 
@@ -15,6 +17,11 @@ using namespace capicola;
  * 2^21 frames × 12 B = 24 MB per channel. Globals because DSY_SDRAM_BSS
  * cannot decorate a class member. */
 static constexpr int kRingFrames = 2097152;
+/* SDRAM isn't running yet when static constructors execute, so anything in
+ * DSY_SDRAM_BSS must have NO constructor code (no default member
+ * initializers). A violation bus-faults at boot, so check it at compile time. */
+static_assert(std::is_trivially_default_constructible<KeyframeRecorder<kRingFrames>>::value,
+              "KeyframeRecorder must stay trivially constructible (it lives in SDRAM)");
 static KeyframeRecorder<kRingFrames> DSY_SDRAM_BSS rec_l;
 static KeyframeRecorder<kRingFrames> DSY_SDRAM_BSS rec_r;
 

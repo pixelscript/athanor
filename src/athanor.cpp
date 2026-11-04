@@ -18,6 +18,8 @@
  *               3 Phaser / flanger                         mod = rate
  *
  * J3: clock in. Delay time follows the clock; LFO rates snap to divisions.
+ * J4 / J5 / J6: CV into the Time / Drive / Space amount knobs. Hold a row's
+ * button and turn its right-hand knob to set that CV's depth (attenuverter).
  *
  * Row 1 uses Capicola's keyframe time-stretch engine
  * (c) heavylight-industries — https://github.com/heavylight-industries/capicola
@@ -119,8 +121,32 @@ static volatile uint8_t variant[3] = {0, 0, 0};
 /* ═════════════════════════════════════════════════════════════════════════
  *  Rings
  * ═════════════════════════════════════════════════════════════════════════ */
-struct AmountStyle { Rgb left, right; };
-struct ModStyle    { Rgb color; bool bipolar; bool clock_pip; };
+struct AmountStyle { Rgb left, right; int row; };
+struct ModStyle    { Rgb color; bool bipolar; bool clock_pip; int row; };
+
+/* ── CV modulation of the amount knobs ──────────────────────────────────
+ * J4 / J5 / J6 add to the Time / Drive / Space amount knobs. Depth is a
+ * per-row attenuverter: hold the row's button and turn its right-hand knob
+ * (noon = off, CW = +, CCW = inverted). +-5 V at full depth moves the
+ * virtual knob +-half its travel, so a bipolar LFO can sweep from one effect,
+ * through the bypass deadband, into the other. */
+static constexpr uint8_t kCvJack[3] = {1u, 2u, 3u};        // cv_jacks[] index: J4, J5, J6
+static constexpr uint8_t kModPot[3] = {1u, 3u, 5u};        // right-hand knob per row
+static volatile float cvDepth[3]  = {0.0f, 0.0f, 0.0f};    // -1..+1
+static volatile float cvOffset[3] = {0.0f, 0.0f, 0.0f};    // depth * volts / 10 (norm units)
+static float          cvLp[3]     = {0.0f, 0.0f, 0.0f};
+static volatile float modValue[3] = {1.0f, 0.5f, 0.5f};    // effective modifier values
+static volatile bool  editing[3]  = {false, false, false}; // depth edit in progress
+static volatile bool  catching[3] = {false, false, false}; // modifier waiting for pickup
+
+struct Gesture
+{
+    bool  down   = false;
+    bool  edited = false;
+    float ref    = 0.0f;   // knob position at press
+    float frozen = 0.5f;   // modifier value held during/after the edit
+};
+static Gesture gesture[3];
 
 static AmountStyle amountStyle[3];
 static ModStyle    modStyle[3];
@@ -134,8 +160,11 @@ static void ApplyLooks()
     for (int r = 0; r < 3; r++)
     {
         const VariantLook& l = kLooks[r][variant[r]];
-        amountStyle[r] = {l.left, l.right};
-        modStyle[r].color = l.mod;
+        amountStyle[r].left  = l.left;
+        amountStyle[r].right = l.right;
+        amountStyle[r].row   = r;
+        modStyle[r].color    = l.mod;
+        modStyle[r].row      = r;
     }
 }
 
@@ -145,6 +174,8 @@ static void DrawAmountRing(LedPanel& p, uint8_t pot, const ArcGeometry& g,
 {
     const AmountStyle& s = *static_cast<const AmountStyle*>(ctx);
     const uint8_t last  = (g.arc_leds > 1) ? (uint8_t)(g.arc_leds - 1) : 1u;
+    const float   phys  = norm;
+    norm = Clamp(norm + cvOffset[s.row], 0.0f, 1.0f);   // show the CV-modulated position
     const int  ptr     = (int)(norm * (float)last + 0.5f);
     const bool neutral = (norm >= kDeadLo && norm <= kDeadHi);
 
@@ -163,6 +194,10 @@ static void DrawAmountRing(LedPanel& p, uint8_t pot, const ArcGeometry& g,
                     ? s.right : LedPanel::Scale(s.right, 0.08f);
         p.SetRingByHour(pot, hour, p.ScaleGlobal(c));
     }
+    /* With CV moving it, a dim white pip marks where the knob itself is. */
+    if (std::fabs(norm - phys) > 0.02f)
+        p.SetRingByHour(pot, g.start_hour + (float)(int)(phys * (float)last + 0.5f) * g.step_hours,
+                        p.ScaleGlobal(Rgb{0x50, 0x50, 0x50}));
 }
 
 /** Modifier ring: level (or bipolar from noon) in the variant colour. */
@@ -172,6 +207,26 @@ static void DrawModRing(LedPanel& p, uint8_t pot, const ArcGeometry& g,
     const ModStyle& s = *static_cast<const ModStyle*>(ctx);
     const uint8_t last = (g.arc_leds > 1) ? (uint8_t)(g.arc_leds - 1) : 1u;
     const float   half = 0.5f / (float)last;
+
+    /* Holding the row button: show the CV depth (bipolar from noon), white
+     * for positive, cyan for inverted. */
+    if (editing[s.row])
+    {
+        const float d  = cvDepth[s.row];
+        const float dn = 0.5f + 0.5f * d;
+        const Rgb   dc = (d >= 0.0f) ? kWhite : Rgb{0x00, 0xC0, 0xFF};
+        for (uint8_t i = 0; i < g.arc_leds; i++)
+        {
+            const float ln = (float)i / (float)last;
+            const bool lit = (dn >= 0.5f) ? (ln >= 0.5f - half && ln <= dn + half)
+                                          : (ln <= 0.5f + half && ln >= dn - half);
+            p.SetRingByHour(pot, g.start_hour + (float)i * g.step_hours,
+                            p.ScaleGlobal(lit ? dc : Rgb{0x06, 0x06, 0x06}));
+        }
+        return;
+    }
+    const float phys = norm;
+    norm = modValue[s.row];   // effective value (held until the knob picks it up)
     for (uint8_t i = 0; i < g.arc_leds; i++)
     {
         const float hour = g.start_hour + (float)i * g.step_hours;
@@ -184,6 +239,9 @@ static void DrawModRing(LedPanel& p, uint8_t pot, const ArcGeometry& g,
             lit = ln <= norm + half;
         p.SetRingByHour(pot, hour, p.ScaleGlobal(lit ? s.color : LedPanel::Scale(s.color, 0.08f)));
     }
+    if (catching[s.row])   // knob not picked up yet: dim pip where it physically is
+        p.SetRingByHour(pot, g.start_hour + (float)(int)(phys * (float)last + 0.5f) * g.step_hours,
+                        p.ScaleGlobal(Rgb{0x50, 0x50, 0x50}));
     if (s.clock_pip && clockPeriodSec > 0.0f && (t_ms - clockEdgeMs) < 50u)
         p.SetRingByHour(pot, 12.0f, p.ScaleGlobal(kWhite));
 }
@@ -235,6 +293,7 @@ static athanor::Drive         drive;
 static athanor::Space         space;
 static athanor::ChorusTrem    chorusTrem;
 static athanor::PhaserFlanger phaserFlanger;
+static athanor::Limiter       limiter;
 
 /* Reverb in internal D2 SRAM (see athanor.lds); delays stay in SDRAM. */
 static float __attribute__((section(".d2_bss"), aligned(4))) plateMem[athanor::Plate::kMemFloats];
@@ -282,6 +341,9 @@ struct SavedState
     uint8_t  v[3];
     uint8_t  version;
     uint32_t check;
+    int8_t   depth[3];   // v2: CV depth per row, -100..+100
+    uint8_t  pad;
+    uint32_t check2;     // v2
 };
 
 static uint32_t SaveCheck(const SavedState& s)
@@ -289,14 +351,25 @@ static uint32_t SaveCheck(const SavedState& s)
     return s.magic ^ (0x9E3779B9u * (1u + s.v[0] + 7u * s.v[1] + 49u * s.v[2] + 343u * s.version));
 }
 
+static uint32_t SaveCheck2(const SavedState& s)
+{
+    uint32_t h = 0x811C9DC5u;
+    for (int i = 0; i < 3; i++) h = (h ^ (uint8_t)s.depth[i]) * 16777619u;
+    return h ^ s.check;
+}
+
 static void LoadVariants()
 {
     dsy_dma_invalidate_cache_for_buffer(reinterpret_cast<uint8_t*>(kSaveAddr), sizeof(SavedState));
     SavedState s;
     std::memcpy(&s, reinterpret_cast<const void*>(kSaveAddr), sizeof(s));
-    if (s.magic != kSaveMagic || s.version != 1 || s.check != SaveCheck(s)) return;
+    if (s.magic != kSaveMagic || s.check != SaveCheck(s)) return;
+    if (s.version != 1 && s.version != 2) return;
     for (int r = 0; r < 3; r++)
         if (s.v[r] < kNumVariants[r]) variant[r] = s.v[r];
+    if (s.version == 2 && s.check2 == SaveCheck2(s))
+        for (int r = 0; r < 3; r++)
+            cvDepth[r] = Clamp((float)s.depth[r] / 100.0f, -1.0f, 1.0f);
 }
 
 static void SaveVariants()
@@ -304,8 +377,10 @@ static void SaveVariants()
     SavedState s{};
     s.magic   = kSaveMagic;
     for (int r = 0; r < 3; r++) s.v[r] = variant[r];
-    s.version = 1;
+    s.version = 2;
     s.check   = SaveCheck(s);
+    for (int r = 0; r < 3; r++) s.depth[r] = (int8_t)(cvDepth[r] * 100.0f + (cvDepth[r] >= 0.0f ? 0.5f : -0.5f));
+    s.check2  = SaveCheck2(s);
     hw.seed.qspi.Erase(kSaveAddr, kSaveAddr + 4096u);
     hw.seed.qspi.Write(kSaveAddr, sizeof(s), reinterpret_cast<uint8_t*>(&s));
     dsy_dma_invalidate_cache_for_buffer(reinterpret_cast<uint8_t*>(kSaveAddr), sizeof(s));
@@ -328,15 +403,71 @@ static void OnPoll(uint32_t t_ms)
 {
     if (!healthy && t_ms > 5000u) { healthy = true; crash::Mark(crash::kRunning); }
 
-    /* Buttons: each press steps that row to its next variant. */
+    const float* phys = loop.Phys();
+
+    /* Buttons. A tap (release without turning anything) steps that row to its
+     * next variant. Hold + turn the row's right-hand knob to set its CV depth:
+     * the modifier's own value is held meanwhile, and afterwards stays held
+     * until the knob is brought back to it (pickup), so nothing jumps. */
     for (int b = 0; b < 3; b++)
     {
+        Gesture& gs = gesture[b];
+        const float k = phys[kModPot[b]];
         if (hw.buttons[b].RisingEdge())
         {
-            variant[b] = (uint8_t)((variant[b] + 1u) % kNumVariants[b]);
-            ApplyLooks();
+            gs.down   = true;
+            gs.edited = false;
+            gs.ref    = k;
+            gs.frozen = modValue[b];
+        }
+        if (gs.down && !gs.edited && std::fabs(k - gs.ref) > 0.02f)
+        {
+            gs.edited  = true;
+            editing[b] = true;
+        }
+        if (gs.down && gs.edited)
+        {
+            float d = (k - 0.5f) * 2.0f;                  // -1..+1, noon = 0
+            if (std::fabs(d) < 0.06f) d = 0.0f;           // detent at noon
+            else d = (d > 0.0f) ? (d - 0.06f) / 0.94f : (d + 0.06f) / 0.94f;
+            cvDepth[b] = Clamp(d, -1.0f, 1.0f);
+        }
+        if (hw.buttons[b].FallingEdge() && gs.down)
+        {
+            gs.down = false;
+            if (gs.edited)
+            {
+                editing[b]  = false;
+                catching[b] = true;
+            }
+            else
+            {
+                variant[b] = (uint8_t)((variant[b] + 1u) % kNumVariants[b]);
+                ApplyLooks();
+            }
             dirtyMs = t_ms ? t_ms : 1u;
         }
+
+        /* Effective modifier value. */
+        if (editing[b] || catching[b])
+        {
+            modValue[b] = gs.frozen;
+            if (catching[b] && std::fabs(k - gs.frozen) < 0.025f) catching[b] = false;
+        }
+        else
+            modValue[b] = k;
+    }
+
+    /* CV inputs J4 / J5 / J6 -> amount offsets (5 ms smoothing, small dead
+     * zone so an unpatched jack's noise can't nudge anything). */
+    for (int r = 0; r < 3; r++)
+    {
+        float v = hw.cv_jacks[kCvJack[r]].Volts();
+        v = Clamp(v, -5.5f, 5.5f);
+        cvLp[r] += 0.2f * (v - cvLp[r]);
+        float vv = cvLp[r];
+        if (std::fabs(vv) < 0.04f) vv = 0.0f;
+        cvOffset[r] = cvDepth[r] * vv * 0.1f;
     }
     /* Save 1.5 s after the last change (one sector erase, ~50 ms). */
     if (dirtyMs != 0 && (t_ms - dirtyMs) > 1500u)
@@ -455,9 +586,9 @@ static void AudioCallback(daisy::AudioHandle::InputBuffer  in,
     crash::Mark(crash::kAudioRow1);
     /* ── Row 1: tape speed (Capicola pitch) / tape + vinyl ─────────── */
     int   tSide; float tAmt;
-    SplitAmount(timeAmt.Norm(), tSide, tAmt);
+    SplitAmount(Clamp(timeAmt.Norm() + cvOffset[0], 0.0f, 1.0f), tSide, tAmt);
     const int   stSide = (v1 == 0) ? tSide : 0;
-    const float mod1   = timeMix.Norm();
+    const float mod1   = modValue[0];
 
     /* Capicola's PITCH control with tape-reel inertia. The knob sets a target
      * playback speed (CCW 1x -> stopped, CW 1x -> 2x); the speed actually
@@ -506,15 +637,15 @@ static void AudioCallback(daisy::AudioHandle::InputBuffer  in,
     crash::Mark(crash::kAudioDrive);
     /* ── Row 2: drive ────────────────────────────────────────────────── */
     int   dSide; float dAmt;
-    SplitAmount(driveAmt.Norm(), dSide, dAmt);
-    drive.SetParams(v2, dSide, dAmt, driveTone.Norm());
+    SplitAmount(Clamp(driveAmt.Norm() + cvOffset[1], 0.0f, 1.0f), dSide, dAmt);
+    drive.SetParams(v2, dSide, dAmt, modValue[1]);
     drive.Process(bl, br, n);
 
     crash::Mark(crash::kAudioMod);
     /* ── Row 3: space / chorus + trem / phaser + flanger ─────────────── */
     int   sSide; float sAmt;
-    SplitAmount(spaceAmt.Norm(), sSide, sAmt);
-    const float mod3 = spaceFb.Norm();
+    SplitAmount(Clamp(spaceAmt.Norm() + cvOffset[2], 0.0f, 1.0f), sSide, sAmt);
+    const float mod3 = modValue[2];
 
     {
         const int side = (v3 == 1) ? sSide : 0;
@@ -553,8 +684,7 @@ static void AudioCallback(daisy::AudioHandle::InputBuffer  in,
 
     for (size_t i = 0; i < n; i++)
     {
-        bl[i] = athanor::OutputLimit(bl[i]);
-        br[i] = athanor::OutputLimit(br[i]);
+        limiter.Process(bl[i], br[i]);
     }
 
     crash::Mark(healthy ? (uint32_t)crash::kRunning : (uint32_t)crash::kFirstTick);
@@ -634,9 +764,9 @@ int main()
 
     LoadVariants();
     crash::Mark(crash::kLoadVariants);
-    modStyle[0] = {{0, 0, 0}, false, false};
-    modStyle[1] = {{0, 0, 0}, true, false};    // tone: bipolar from noon
-    modStyle[2] = {{0, 0, 0}, false, true};    // blinks on J3 clock
+    modStyle[0] = {{0, 0, 0}, false, false, 0};
+    modStyle[1] = {{0, 0, 0}, true, false, 1};    // tone: bipolar from noon
+    modStyle[2] = {{0, 0, 0}, false, true, 2};    // blinks on J3 clock
     ApplyLooks();
 
     stretch.Init(sr);
@@ -656,6 +786,7 @@ int main()
     engageSm.Init(0.0f, 0.08f);     // ~17 ms
     mixSm.Init(1.0f, 0.08f);
 
+    limiter.Init(sr);
     cpu.Init(sr, kBlock);
     ticksPerBlockInv = sr / ((float)daisy::System::GetTickFreq() * (float)kBlock);
 

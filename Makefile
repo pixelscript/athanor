@@ -2,6 +2,7 @@
 # Athanor — performance end-of-chain effect for Hermetic Modular Alchemy Lab
 #
 # Built on alchemy-template (standard Daisy workflow, libDaisy core Makefile):
+#   git submodule update --init --recursive   — fetch the SDK + libDaisy
 #   make libdaisy       — build lib/libDaisy once after cloning
 #   make                — build firmware → build/athanor.bin
 #   make program-dfu    — flash over USB (module in DFU mode: hold B3 at boot)
@@ -40,6 +41,13 @@ C_INCLUDES += \
 
 C_DEFS += -DALCHEMY_BOARD_V2
 
+# ── Version stamp (HostLink HELLO + descriptor) ─────────────────────────────
+# version.txt is maintained by release-please; the short git hash marks
+# exactly which commit a binary came from (+ "-dirty" for local changes).
+ATHANOR_VERSION  := $(shell cat version.txt 2>/dev/null || echo 0.0.0)
+ATHANOR_GIT_HASH := $(shell git describe --always --dirty --abbrev=7 --exclude '*' 2>/dev/null || echo dev)
+C_DEFS += -DATHANOR_VERSION='"$(ATHANOR_VERSION)"' -DATHANOR_GIT_HASH='"$(ATHANOR_GIT_HASH)"'
+
 # Capicola's engine needs real optimisation to fit the audio budget.
 OPT = -O2
 
@@ -66,3 +74,12 @@ USBPID ?= df11
 program-live: all
 	node $(ALCHEMY_DIR)/tools/hostlink-cli/hostlink.mjs reboot bootloader
 	dfu-util -w -a 0 -s $(FLASH_ADDRESS):leave -D $(BUILD_DIR)/$(TARGET_BIN) -d ,0483:$(USBPID)
+
+# ── Host-side DSP tests (no hardware, native compiler) ──────────────────────
+HOST_CXX ?= g++
+.PHONY: test
+test:
+	$(HOST_CXX) -O2 -std=c++17 -Itests/stub -Isrc -Idsp tests/host_test.cpp \
+	    src/fx.cpp src/drive.cpp src/age.cpp src/modfx.cpp src/stretch_engine.cpp \
+	    -o build/host_test
+	./build/host_test

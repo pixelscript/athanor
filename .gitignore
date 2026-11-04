@@ -1,3 +1,22 @@
+# build output
 build/
-lib/
+dist/
+*.o
+*.d
+*.lst
+*.map
+
+# local prebuilt copies (releases carry the real ones)
+/athanor.bin
+/athanor.elf
+
+# host test / probe binaries
+tests/*_probe
+tests/host_test
+tests/dbg
+tests/*.raw
+
+# editor / OS
+.DS_Store
 ._*
+.vscode/

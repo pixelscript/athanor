@@ -118,6 +118,7 @@ struct DelayLine
     /** Integer tap: d >= 1 is the sample written d writes ago (d < size). */
     inline float Tap(uint32_t d) const
     {
+        if (d >= size) d = size - 1;   // never read outside the line
         int32_t i = (int32_t)w - (int32_t)d;
         if (i < 0) i += (int32_t)size;
         return buf[i];
@@ -221,6 +222,7 @@ class Space
     DelayLine dl_[2];
     OnePoleLp dl_lp_[2];
     DcBlock   dl_dc_[2];
+    OnePoleLp rev_hp_;
     float     dly_target_ = 18000.0f;
     Smooth    dly_time_;
 
@@ -240,4 +242,26 @@ inline float OutputLimit(float x)
     return x < 0.0f ? -y : y;
 }
 
+/**
+ * Stereo-linked peak limiter for the output. Turns the gain down instead of
+ * reshaping the waveform, so loud reverb/delay peaks don't turn into
+ * one-sided clipping crackle. Instant attack, ~120 ms release; both channels
+ * share one gain so the stereo image doesn't lurch. The soft clip above only
+ * catches what slips past (it never engages below 0.8 after limiting).
+ */
+struct Limiter
+{
+    float g = 1.0f, rel = 0.0f;
+    float thr = 0.75f;
+    void Init(float sr) { rel = 1.0f - std::exp(-1.0f / (0.12f * sr)); g = 1.0f; }
+    inline void Process(float& l, float& r)
+    {
+        const float pk = std::fmax(std::fabs(l), std::fabs(r));
+        const float want = (pk * g > thr) ? thr / pk : 1.0f;
+        if (want < g) g = want;              // instant attack
+        else          g += rel * (want - g); // smooth release
+        l = OutputLimit(l * g);
+        r = OutputLimit(r * g);
+    }
+};
 } // namespace athanor

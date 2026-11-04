@@ -1,15 +1,28 @@
 # Athanor
 
-A performance end-of-chain effect firmware for the Hermetic Modular **Alchemy Lab** (V2 hardware).
-It has three effect rows that feed into each other from top to bottom. Each row has one
-**amount** knob on the left, one **modifier** knob on the right, and a button that steps through
-that row's variants.
+[![Build](../../actions/workflows/build.yml/badge.svg)](../../actions/workflows/build.yml)
+[![Release](../../actions/workflows/release-please.yml/badge.svg)](../../releases/latest)
+
+> **This repo has been made with the help of an LLM**
+
+**A performance effects firmware for the end of your chain, for the Hermetic Modular Alchemy Lab
+(V2).** Three stacked effect rows: tape speed (or tape/vinyl age), drive, and space. Each row is
+played from one big knob, and that knob has a **wide neutral deadband from 10 to 2 o'clock**. Throw
+it back to the top and that effect is fully bypassed, so you can dive in and back out mid-set
+without hunting for "off".
+
+The tape-speed row runs **[Capicola](https://github.com/heavylight-industries/capicola)'s keyframe
+engine by Heavylight Industries**. See [Credits](#credits).
+
+Each row has one **amount** knob on the left, one **modifier** knob on the right, a button that steps
+through that row's variants, and a CV input that modulates the amount knob.
 
 ```
-        LEFT (amount)   BUTTON   RIGHT (modifier)
-Row 1   [P1] TIME       B1       [P2] MIX
-Row 2   [P3] DRIVE      B2       [P4] TONE
-Row 3   [P5] SPACE      B3       [P6] FEEDBACK / RATE
+        LEFT (amount)   BUTTON   RIGHT (modifier)        CV in
+Row 1   [P1] TIME       B1       [P2] MIX                J4
+Row 2   [P3] DRIVE      B2       [P4] TONE               J5
+Row 3   [P5] SPACE      B3       [P6] FEEDBACK / RATE    J6
+                                                 clock:  J3
 ```
 
 | Button | Variant | Amount CCW | Amount CW | Modifier |
@@ -23,9 +36,10 @@ Row 3   [P5] SPACE      B3       [P6] FEEDBACK / RATE
 | B3 | 2 Chorus/trem | chorus | tremolo | rate |
 | B3 | 3 Phaser/flanger | phaser | flanger | rate |
 
-Each press moves to the row's next variant, wrapping round. The button LED and that row's rings
-change colour to show which one you're on. Your selections are saved about 1.5 s after the last
-press and come back at power-on. Switching variants crossfades, so you can do it live.
+A **tap** moves to the row's next variant, wrapping round. The variant changes when you release the
+button. The button LED and that row's rings change colour to show which one you're on. Your
+selections (and CV depths) are saved about 1.5 s after the last change and come back at power-on.
+Switching variants crossfades, so you can do it live.
 
 Signal flow: **In → Speed / Age → Drive → Space → Out**, in stereo.
 
@@ -38,6 +52,22 @@ zone the row is bypassed, so you can throw the knob back to the top mid-performa
 - The left (CCW) and right (CW) zones are tinted in their flavour's colour. They light up from the
   deadband edge out to the pointer as you turn into them.
 - Each row fades in over the first few degrees past the deadband edge, so leaving neutral never clicks.
+
+## CV modulation (J4 / J5 / J6)
+
+**J4**, **J5** and **J6** add to the **Time**, **Drive** and **Space** amount knobs. Each row's CV has
+its own depth, set like an attenuverter:
+
+- **Hold the row's button and turn its right-hand knob.** Noon = off, CW = positive depth, CCW =
+  inverted. While you hold, the ring switches to show the depth: white for positive, cyan for
+  inverted, with a detent at noon.
+- **Release.** The knob goes back to its normal job, but its value stays where it was until you turn
+  the knob back to it (a dim pip shows where the knob physically is). So setting a depth never makes
+  the mix, tone or feedback jump.
+- **Depth range:** at full depth, ±5 V moves the virtual knob half its travel. A bipolar LFO can
+  sweep from one effect, through the bypass deadband, into the other. The amount ring follows the
+  modulated position, with a dim pip at the physical knob.
+- **Unpatched jacks** contribute nothing, and depths default to off.
 
 ## Row 1, variant 1: Speed (Capicola's pitch control)
 
@@ -125,8 +155,8 @@ on every clock edge. The modulation variants use the same clock for their rates.
 
 ## Buttons
 
-See the variant table at the top. Each button LED shows its row's current variant colour. B3 doubles
-as a CPU meter and overrides its colour when needed:
+Tap = next variant; hold + turn the right-hand knob = CV depth (see above). Each button LED shows its
+row's current variant colour. B3 doubles as a CPU meter and overrides its colour when needed:
 
 - **Red**: an audio block overran in the last 2 seconds (real overload; you'd hear clicks).
 - **Amber**: average load is above 80% (close to the limit).
@@ -157,17 +187,43 @@ Stages: 1 static init, 2 main, 3 hardware init, 4 load saved variants, 5 speed e
 13 first control frame, 14 to 19 inside the audio callback (entry, speed row, age, drive, modulation,
 space).
 
+## Download
+
+Prebuilt firmware is attached to every [GitHub release](../../releases/latest) as
+`athanor-vX.Y.Z.bin`, along with the matching `.elf` for decoding crash reports. Every push also
+builds a test binary, available under the **Actions** tab as a workflow artifact.
+
 ## Build
 
-You need `git`, `make`, `arm-none-eabi-gcc` and `dfu-util` (`brew install make dfu-util` and
+You need `git`, `make`, `arm-none-eabi-gcc` (13.x) and `dfu-util` (`brew install make dfu-util` and
 `brew install --cask gcc-arm-embedded`).
 
 ```sh
-./setup.sh        # clones pinned alchemy-sdk v0.12.0 + libDaisy into lib/, builds libDaisy
+git clone --recurse-submodules <this repo> athanor && cd athanor
+make libdaisy     # once (or ./setup.sh)
 make              # -> build/athanor.bin
+make test         # host-side DSP tests, no hardware needed
 ```
 
-A prebuilt `athanor.bin` is included in this folder.
+The Alchemy SDK (v0.12.0) and libDaisy are git submodules pinned to the commits this firmware is
+tested against. The build stamps `version.txt` and the git hash into the HostLink identity, so the
+web programmer shows exactly what's running.
+
+## Releases and versioning
+
+Releases are automated with [release-please](https://github.com/googleapis/release-please).
+Write commit messages in [Conventional Commits](https://www.conventionalcommits.org) style:
+
+- `fix: …` gives a patch release.
+- `feat: …` gives a minor release.
+- `feat!: …` or a `BREAKING CHANGE:` footer gives a major release.
+
+release-please keeps a release PR open that bumps `version.txt` and `CHANGELOG.md`. Merging it tags
+the release, and the **Release** workflow builds the firmware at that tag and attaches the `.bin`,
+the `.elf` and `SHA256SUMS.txt`.
+
+Repository setting needed once: **Settings → Actions → General → Workflow permissions → "Allow GitHub
+Actions to create and approve pull requests"**, so release-please can open its PR.
 
 ## Flash
 
@@ -198,20 +254,41 @@ works for later updates without the button dance.
 | Saved variants | one QSPI sector at `0x907FF000` (top of the preset region) |
 | Capicola voicing (stretch, grain size, transient threshold, fade, shaper) | `src/stretch_engine.cpp` |
 | Reel inertia (speed row) | `kReelHz`, `kReelDamping`, `src/athanor.cpp` |
+| CV jacks, depth range, dead zone | `kCvJack`, `OnPoll()`, `src/athanor.cpp` |
 | Memory layout (reverb in internal SRAM) | `athanor.lds` (copy of the SDK script + `.d2_bss`) |
 
-`tests/host_test.cpp` is a desktop sanity test for the DSP. The probes in `tests/` render the
-stretcher for inspection: `speed_probe` and `glide_probe` check the rate, `trans_probe` counts
-attacks, and `tone_probe` measures roughness on a sustained chord.
+`tests/host_test.cpp` is a desktop sanity test for all the DSP (`make test`). The probes in
+`tests/` measure specific things:
 
-```sh
-g++ -O2 -std=c++17 -I tests/stub -I src -I dsp tests/host_test.cpp src/fx.cpp src/drive.cpp \
-    src/age.cpp src/modfx.cpp src/stretch_engine.cpp -o host_test && ./host_test
-```
+- `pitch_probe`: speed tracking and reel overshoot.
+- `wow_probe`: wow/flutter depth in cents.
+- `rev_probe`: reverb click detection.
+- `rev_balance_probe`: reverb left/right balance.
+- `plate_ir`: plate impulse response.
+
+## Credits
+
+Full details, with file-level attribution, are in [CREDITS.md](CREDITS.md).
+
+- **Capicola, by Heavylight Industries**
+  ([github.com/heavylight-industries/capicola](https://github.com/heavylight-industries/capicola)).
+  The tape-speed row is Capicola's keyframe time-stretch / pitch engine, from the author's peer-reviewed
+  DAFx26 paper, *[Keyframe Time Stretching via Extrema Sampling](https://github.com/heavylight-industries/dafx26-paper)*.
+  This includes the sparse keyframe analyzer, granular reader, TKEO transient detector, ZDF filters
+  and tabulated waveshapers. The sound of the Speed row, including the pitch behaviour it's modelled
+  on, is the author's work; Athanor just puts it behind a deadbanded knob with reel inertia. If you
+  like it, go and get the full Capicola firmware.
+- **Hermetic Modular**: the Alchemy Lab hardware, the Alchemy SDK and the alchemy-template project
+  this firmware started from.
+- **Electrosmith**: libDaisy.
+- **Jon Dattorro**: the plate reverb topology (*Effect Design, Part 1*, JAES 1997).
+- **Parker, Zavalishin & Le Bivic**: first-order antiderivative anti-aliasing (ADAA) used by the
+  analog drive shapers (*Reducing the Aliasing of Nonlinear Waveshaping Using Continuous-Time
+  Convolution*, DAFx-16).
 
 ## License
 
-**GNU AGPL v3.0.** The time-stretch engine in `dsp/` is Capicola by heavylight-industries
-(https://github.com/heavylight-industries/capicola), lightly modified. The modifications are marked
-"Athanor" in `Granule.h` and `KeyframeRecorder.h` and add speed-up (stretch > 1) support. If you
-distribute this firmware or hardware running it, you must offer the source.
+**GNU AGPL v3.0** (see [LICENSE](LICENSE)). Athanor includes Capicola's engine, which is AGPL-3.0,
+so the whole firmware is too. If you distribute this firmware, or hardware running it, you must
+offer the corresponding source. The Alchemy SDK and libDaisy are MIT-licensed submodules under their
+own terms.
