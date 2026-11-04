@@ -1,0 +1,49 @@
+# Builds the firmware on every push and pull request, runs the host-side DSP
+# tests, and attaches athanor.bin (+ .elf for crash decoding) as a workflow
+# artifact. Tagged releases are built separately by release-please.yml.
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install ARM toolchain
+        uses: carlosperate/arm-none-eabi-gcc-action@v1
+        with:
+          release: '13.2.Rel1'
+
+      - name: Build libDaisy
+        run: make libdaisy -j"$(nproc)"
+
+      - name: Build firmware
+        run: make -j"$(nproc)"
+
+      - name: Host DSP tests
+        run: make test
+
+      - name: Name artifacts
+        run: |
+          VERSION=$(cat version.txt)
+          SHA=$(git rev-parse --short HEAD)
+          mkdir -p dist
+          cp build/athanor.bin "dist/athanor-${VERSION}-${SHA}.bin"
+          cp build/athanor.elf "dist/athanor-${VERSION}-${SHA}.elf"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: athanor-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: error
