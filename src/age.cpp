@@ -8,7 +8,7 @@ namespace athanor {
 
 namespace {
 inline float Ss(float u) { return u / std::sqrt(1.0f + u * u); }
-constexpr float kBaseMs = 6.0f;   // wow delay centre (latency while engaged)
+constexpr float kBaseMs = 14.0f;  // wow delay centre (latency while engaged); > max depth
 } // namespace
 
 void Age::Init(float sr, float* mem)
@@ -24,8 +24,8 @@ void Age::Init(float sr, float* mem)
         ch_[c].v_hiss.SetHz(7000.0f, sr);
         ch_[c].v_click_lp.SetHz(9000.0f, sr);
     }
-    drift_lp_.SetHz(0.3f, sr);
-    flut_noise_lp_.SetHz(25.0f, sr);
+    drift_k_ = 1.0f - std::exp(-2.0f * kPi * 0.6f / sr);   // smooth the wander
+    flut_noise_lp_.SetHz(20.0f, sr);
     rng_.s = 0xA7E5u;
     const float k = 1.0f - std::exp(-1.0f / (0.005f * sr));
     mix_t_.Init(0.0f, k);
@@ -79,22 +79,46 @@ void Age::Process(float* l, float* r, std::size_t n)
         /* ── Tape ─────────────────────────────────────────────────────── */
         if (mt > 1.0e-5f)
         {
-            wow_ph_  = Frac(wow_ph_ + 0.65f * inv_sr);
-            flut_ph_ = Frac(flut_ph_ + 8.7f * inv_sr);
-            const float drift = drift_lp_.Tick(rng_.Next()) * 6.0f;      // slow wander
-            const float fn    = flut_noise_lp_.Tick(rng_.Next()) * 3.0f;
-            const float wow_ms  = 0.12f * a + 2.4f * m;
-            const float flut_ms = 0.02f * a + 0.22f * m;
-            const float d_ms = kBaseMs
-                + wow_ms  * (0.7f * std::sin(2.0f * kPi * wow_ph_) + 0.3f * Clamp(drift, -1.0f, 1.0f))
-                + flut_ms * (0.7f * std::sin(2.0f * kPi * flut_ph_) + 0.3f * Clamp(fn, -1.0f, 1.0f));
+            /* Wow: a slow wobble (~0.55 Hz) plus a random wander whose target
+             * changes every 0.7-2 s, so it never sounds like a clean vibrato.
+             * Flutter: two fast components (~7 Hz capstan, ~13 Hz roller) and
+             * filtered noise for scrape. The modifier is on a curve so the top
+             * of the knob gets seasick: about +-70 cents of wow and +-25 cents
+             * of flutter at full. */
+            wow_ph_   = Frac(wow_ph_ + 0.55f * inv_sr);
+            flut_ph_  = Frac(flut_ph_ + 7.1f * inv_sr);
+            flut2_ph_ = Frac(flut2_ph_ + 13.3f * inv_sr);
+            if (--drift_timer_ <= 0)
+            {
+                drift_tgt_   = rng_.Next();
+                drift_timer_ = (int)((0.7f + 1.3f * rng_.Uni()) * sr_);
+            }
+            drift_ += drift_k_ * (drift_tgt_ - drift_);
+            const float fn = Clamp(flut_noise_lp_.Tick(rng_.Next()) * 40.0f, -1.0f, 1.0f);
+
+            const float mc = m * std::sqrt(m);                     // m^1.5 curve
+            const float wow_ms  = 0.25f * a + 11.0f * mc;          // ~+-4 % pitch at full
+            const float flut_ms = 0.015f * a + 0.30f * mc;         // ~+-1.4 % pitch at full
+            const float wob  = 0.6f * std::sin(2.0f * kPi * wow_ph_) + 0.4f * drift_;
+            const float flut = 0.55f * std::sin(2.0f * kPi * flut_ph_)
+                             + 0.25f * std::sin(2.0f * kPi * flut2_ph_) + 0.2f * fn;
+            const float d_ms = kBaseMs + wow_ms * wob + flut_ms * flut;
             const float d = d_ms * 0.001f * sr_;
+
+            /* Worn tape: the level wobbles with the flutter, and at high
+             * settings the odd dropout dips the signal for a moment. */
+            if (drop_timer_ > 0) drop_timer_--;
+            else if (rng_.Uni() < (0.35f * mc) * inv_sr)
+                drop_timer_ = (int)((0.04f + 0.12f * rng_.Uni()) * sr_);
+            drop_env_ += 0.004f * (((drop_timer_ > 0) ? 0.45f : 1.0f) - drop_env_);
+            const float level = drop_env_ * (1.0f - 0.08f * mc * (0.5f + 0.5f * flut));
+
             const float g = 1.0f + 3.5f * a;
             const float comp = 0.3f / Ss(0.3f * g);
             for (int c = 0; c < 2; c++)
             {
                 Chan& ch = ch_[c];
-                float y = comp * Ss(g * ch.wow.TapF(d));
+                float y = level * comp * Ss(g * ch.wow.TapF(d));
                 y += 0.45f * a * ch.t_bump.Tick(y);                       // head bump
                 y = ch.t_hf2.Tick(ch.t_hf1.Tick(y));                      // HF loss
                 y += 0.0015f * a * rng_.Next();                           // hiss

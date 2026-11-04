@@ -68,7 +68,7 @@ artefacts knob.
 | Knob | Tape (CCW) | Vinyl (CW) |
 |---|---|---|
 | AMOUNT | Saturation, head bump, high-frequency loss, a touch of wow and hiss | Narrower bandwidth (bass and treble roll-off), mono-ing, warmth, off-centre warp, a light crackle floor and hiss |
-| MIX | **More wow and flutter** (slow wander, up to seasick) | **More hiss, crackle and clicks** |
+| MIX | **More wow and flutter**: slow, irregular wow plus capstan flutter, with level wobble and the odd dropout near the top. Pitch swing goes from nothing, to about ±65 cents halfway, to over a semitone at full. | **More hiss, crackle and clicks** |
 
 The Speed engine keeps recording in the background, so switching back to it is instant.
 

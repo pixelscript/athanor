@@ -44,8 +44,12 @@ class Age
     Rng    rng_;
 
     /* LFOs (0..1 phase) */
-    float  wow_ph_ = 0.0f, flut_ph_ = 0.0f, rec_ph_ = 0.0f;
-    OnePoleLp drift_lp_, flut_noise_lp_;
+    float  wow_ph_ = 0.0f, flut_ph_ = 0.0f, flut2_ph_ = 0.0f, rec_ph_ = 0.0f;
+    OnePoleLp flut_noise_lp_;
+    float  drift_ = 0.0f, drift_tgt_ = 0.0f, drift_k_ = 0.0f;
+    int    drift_timer_ = 0;
+    int    drop_timer_ = 0;
+    float  drop_env_ = 1.0f;
 
     Smooth mix_t_, mix_v_, amt_, mod_;
     float  t_mix_t_ = 0.0f, t_mix_v_ = 0.0f, t_amt_ = 0.0f, t_mod_ = 0.0f;
