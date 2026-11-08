@@ -26,6 +26,7 @@ CPP_SOURCES = \
     src/age.cpp \
     src/drive.cpp \
     src/modfx.cpp \
+    src/recorder.cpp \
     src/crashlog.cpp
 
 # ── Alchemy SDK, compiled straight from the submodule ───────────────────────
@@ -56,6 +57,9 @@ APP_TYPE = BOOT_SRAM
 # Local copy of the SDK script + a .d2_bss section (reverb in internal SRAM).
 LDSCRIPT = athanor.lds
 
+# SD recording: FatFS long-file-name tables (ccsbcs.c) from libDaisy.
+USE_FATFS = 1
+
 # The Alchemy SDK requires C++17 (libDaisy's default is gnu++14).
 CPP_STANDARD = -std=gnu++17
 
@@ -83,3 +87,16 @@ test:
 	    src/fx.cpp src/drive.cpp src/age.cpp src/modfx.cpp src/stretch_engine.cpp \
 	    -o build/host_test
 	./build/host_test
+	$(HOST_CXX) -O2 -std=c++17 -Itests/stub -Isrc -Idsp tests/interval_probe.cpp \
+	    src/stretch_engine.cpp -o build/interval_probe
+	./build/interval_probe
+	@# SD recorder on the real FatFS + the SDK's RAM disk (asserts aligned DMA).
+	mkdir -p build/ffshim/util
+	echo '#include "$(abspath $(LIBDAISY_DIR))/src/sys/ffconf.h"' > build/ffshim/ffconf.h
+	cp $(ALCHEMY_DIR)/tests/host/fatfs_conf/util/bsp_sd_diskio.h build/ffshim/util/
+	$(HOST_CXX) -O1 -std=c++17 -Itests/stub -Isrc -I$(ALCHEMY_DIR)/framework/include \
+	    -I$(ALCHEMY_DIR)/tests/host -Ibuild/ffshim -I$(FATFS_DIR) \
+	    tests/rec_probe.cpp src/recorder.cpp $(ALCHEMY_DIR)/framework/src/storage/sd_card.cpp \
+	    $(ALCHEMY_DIR)/tests/host/ram_diskio.cpp -x c $(FATFS_DIR)/ff.c $(FATFS_DIR)/option/ccsbcs.c \
+	    -o build/rec_probe
+	./build/rec_probe

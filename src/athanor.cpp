@@ -10,6 +10,9 @@
  *
  *   B1  Row 1   1 Speed: tape slow-down / speed-up (pitch)  mod = mix
  *               2 Age:   tape / vinyl                      mod = wow+flutter / hiss+clicks
+ *               3 Interval: snaps the tape speed to musical steps
+ *                        CCW -5th / -oct / -oct-5th / -2 oct,
+ *                        CW  +5th / +oct / +oct+5th / +2 oct    mod = mix
  *   B2  Row 2   1 Saturation  analog / digital             mod = tone
  *               2 Distortion  analog / digital
  *               3 Fuzz        analog / digital
@@ -18,8 +21,12 @@
  *               3 Phaser / flanger                         mod = rate
  *
  * J3: clock in. Delay time follows the clock; LFO rates snap to divisions.
- * J4 / J5 / J6: CV into the Time / Drive / Space amount knobs. Hold a row's
- * button and turn its right-hand knob to set that CV's depth (attenuverter).
+ * J4 / J5 / J6: CV into the Time / Drive / Space rows. Each jack can move
+ * both knobs of its row, each with its own depth (attenuverter): hold the
+ * row's button and turn the knob you want the CV to move.
+ *
+ * Hold B1 + B3 together for half a second to start / stop recording the
+ * output to the SD card (REC0001.WAV, ... 24-bit stereo).
  *
  * Row 1 uses Capicola's keyframe time-stretch engine
  * (c) heavylight-industries — https://github.com/heavylight-industries/capicola
@@ -35,6 +42,8 @@
 #include "util/CpuLoadMeter.h"
 #include "alchemy/hw/alchemy_lab.h"
 #include "alchemy/host_link/host.h"
+#include "alchemy/storage/fs_extension.h"
+#include "alchemy/storage/sd_card.h"
 #include "alchemy/surface/control_loop.h"
 #include "alchemy/surface/page.h"
 #include "alchemy/surface/virtual_knob.h"
@@ -44,6 +53,7 @@
 #include "drive.h"
 #include "fx.h"
 #include "modfx.h"
+#include "recorder.h"
 #include "stretch_engine.h"
 
 using namespace alchemy;
@@ -93,13 +103,13 @@ struct VariantLook
     Rgb button;        // row button
 };
 
-static constexpr uint8_t kNumVariants[3] = {2, 3, 3};
+static constexpr uint8_t kNumVariants[3] = {3, 3, 3};
 
 static constexpr VariantLook kLooks[3][3] = {
     {   /* Row 1 */
         {{0x00, 0x50, 0xFF}, {0x00, 0xFF, 0x90}, {0x40, 0xA0, 0xFF}, {0x00, 0x90, 0xFF}},  // time
         {{0xFF, 0x60, 0x10}, {0x20, 0xC0, 0xC0}, {0xFF, 0xB0, 0x60}, {0xFF, 0x70, 0x20}},  // tape/vinyl
-        {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+        {{0xFF, 0x20, 0xC0}, {0xFF, 0xD0, 0x00}, {0xD0, 0x90, 0xFF}, {0xC0, 0x20, 0xFF}},  // interval
     },
     {   /* Row 2: analog warm / digital cool; level shown on button + tone ring */
         {{0xFF, 0x60, 0x00}, {0x00, 0xA0, 0xFF}, {0x40, 0xFF, 0x40}, {0x40, 0xFF, 0x40}},  // sat
@@ -124,29 +134,40 @@ static volatile uint8_t variant[3] = {0, 0, 0};
 struct AmountStyle { Rgb left, right; int row; };
 struct ModStyle    { Rgb color; bool bipolar; bool clock_pip; int row; };
 
-/* ── CV modulation of the amount knobs ──────────────────────────────────
- * J4 / J5 / J6 add to the Time / Drive / Space amount knobs. Depth is a
- * per-row attenuverter: hold the row's button and turn its right-hand knob
- * (noon = off, CW = +, CCW = inverted). +-5 V at full depth moves the
- * virtual knob +-half its travel, so a bipolar LFO can sweep from one effect,
- * through the bypass deadband, into the other. */
+/* ── CV modulation ──────────────────────────────────────────────────────
+ * J4 / J5 / J6 each feed one row, and can move BOTH of that row's knobs,
+ * each with its own depth (a per-knob attenuverter: noon = off, CW = +,
+ * CCW = inverted). Hold the row's button and turn the knob you want to
+ * modulate; its ring shows the depth while you hold. +-5 V at full depth
+ * moves the virtual knob +-half its travel, so a bipolar LFO on an amount
+ * knob can sweep from one effect, through the bypass deadband, into the
+ * other. Depths are indexed by pot: 0 1 / 2 3 / 4 5 = left/right per row. */
 static constexpr uint8_t kCvJack[3] = {1u, 2u, 3u};        // cv_jacks[] index: J4, J5, J6
+static constexpr uint8_t kAmtPot[3] = {0u, 2u, 4u};        // left-hand knob per row
 static constexpr uint8_t kModPot[3] = {1u, 3u, 5u};        // right-hand knob per row
-static volatile float cvDepth[3]  = {0.0f, 0.0f, 0.0f};    // -1..+1
-static volatile float cvOffset[3] = {0.0f, 0.0f, 0.0f};    // depth * volts / 10 (norm units)
+static volatile float cvDepth[6]  = {0, 0, 0, 0, 0, 0};    // -1..+1, per pot
+static volatile float cvOffset[6] = {0, 0, 0, 0, 0, 0};    // depth * volts / 10 (norm units)
 static float          cvLp[3]     = {0.0f, 0.0f, 0.0f};
-static volatile float modValue[3] = {1.0f, 0.5f, 0.5f};    // effective modifier values
-static volatile bool  editing[3]  = {false, false, false}; // depth edit in progress
-static volatile bool  catching[3] = {false, false, false}; // modifier waiting for pickup
+static volatile float amtValue[3] = {0.5f, 0.5f, 0.5f};    // effective amount (held while editing)
+static volatile float modValue[3] = {1.0f, 0.5f, 0.5f};    // effective modifier
+static volatile int8_t editing[3] = {-1, -1, -1};          // pot whose depth is being set, -1 none
+static volatile bool  catching[6] = {false, false, false, false, false, false}; // waiting for pickup
 
 struct Gesture
 {
-    bool  down   = false;
-    bool  edited = false;
-    float ref    = 0.0f;   // knob position at press
-    float frozen = 0.5f;   // modifier value held during/after the edit
+    bool   down     = false;
+    int8_t target   = -1;     // pot being edited this hold (-1 = none yet)
+    bool   consumed = false;  // used by a chord: no variant step on release
+    float  refAmt   = 0.0f;   // knob positions at press
+    float  refMod   = 0.0f;
+    float  frozen[2] = {0.5f, 0.5f};   // amount / modifier values held during the edit
 };
 static Gesture gesture[3];
+
+static inline float CvNorm(float knob, uint8_t pot)
+{
+    return Clamp(knob + cvOffset[pot], 0.0f, 1.0f);
+}
 
 static AmountStyle amountStyle[3];
 static ModStyle    modStyle[3];
@@ -168,14 +189,42 @@ static void ApplyLooks()
     }
 }
 
+/** While a row button is held and a knob is being assigned: that knob's CV
+ *  depth, bipolar from noon (white = positive, cyan = inverted). */
+static void DrawDepth(LedPanel& p, uint8_t pot, const ArcGeometry& g, float d)
+{
+    const uint8_t last = (g.arc_leds > 1) ? (uint8_t)(g.arc_leds - 1) : 1u;
+    const float   half = 0.5f / (float)last;
+    const float   dn   = 0.5f + 0.5f * d;
+    const Rgb     dc   = (d >= 0.0f) ? kWhite : Rgb{0x00, 0xC0, 0xFF};
+    for (uint8_t i = 0; i < g.arc_leds; i++)
+    {
+        const float ln = (float)i / (float)last;
+        const bool lit = (dn >= 0.5f) ? (ln >= 0.5f - half && ln <= dn + half)
+                                      : (ln <= 0.5f + half && ln >= dn - half);
+        p.SetRingByHour(pot, g.start_hour + (float)i * g.step_hours,
+                        p.ScaleGlobal(lit ? dc : Rgb{0x06, 0x06, 0x06}));
+    }
+}
+
+/** Dim pip where the knob physically sits, when CV / pickup moves the value away. */
+static void DrawPhysPip(LedPanel& p, uint8_t pot, const ArcGeometry& g, float phys, float shown)
+{
+    if (std::fabs(shown - phys) <= 0.02f) return;
+    const uint8_t last = (g.arc_leds > 1) ? (uint8_t)(g.arc_leds - 1) : 1u;
+    p.SetRingByHour(pot, g.start_hour + (float)(int)(phys * (float)last + 0.5f) * g.step_hours,
+                    p.ScaleGlobal(Rgb{0x50, 0x50, 0x50}));
+}
+
 /** Amount ring: dim deadband, each side tinted, lit from the edge to the pointer. */
 static void DrawAmountRing(LedPanel& p, uint8_t pot, const ArcGeometry& g,
                            float norm, uint32_t /*t_ms*/, void* ctx)
 {
     const AmountStyle& s = *static_cast<const AmountStyle*>(ctx);
+    if (editing[s.row] == (int8_t)pot) { DrawDepth(p, pot, g, cvDepth[pot]); return; }
     const uint8_t last  = (g.arc_leds > 1) ? (uint8_t)(g.arc_leds - 1) : 1u;
     const float   phys  = norm;
-    norm = Clamp(norm + cvOffset[s.row], 0.0f, 1.0f);   // show the CV-modulated position
+    norm = CvNorm(amtValue[s.row], pot);   // the value actually playing
     const int  ptr     = (int)(norm * (float)last + 0.5f);
     const bool neutral = (norm >= kDeadLo && norm <= kDeadHi);
 
@@ -194,10 +243,7 @@ static void DrawAmountRing(LedPanel& p, uint8_t pot, const ArcGeometry& g,
                     ? s.right : LedPanel::Scale(s.right, 0.08f);
         p.SetRingByHour(pot, hour, p.ScaleGlobal(c));
     }
-    /* With CV moving it, a dim white pip marks where the knob itself is. */
-    if (std::fabs(norm - phys) > 0.02f)
-        p.SetRingByHour(pot, g.start_hour + (float)(int)(phys * (float)last + 0.5f) * g.step_hours,
-                        p.ScaleGlobal(Rgb{0x50, 0x50, 0x50}));
+    DrawPhysPip(p, pot, g, phys, norm);
 }
 
 /** Modifier ring: level (or bipolar from noon) in the variant colour. */
@@ -205,28 +251,12 @@ static void DrawModRing(LedPanel& p, uint8_t pot, const ArcGeometry& g,
                         float norm, uint32_t t_ms, void* ctx)
 {
     const ModStyle& s = *static_cast<const ModStyle*>(ctx);
+    if (editing[s.row] == (int8_t)pot) { DrawDepth(p, pot, g, cvDepth[pot]); return; }
     const uint8_t last = (g.arc_leds > 1) ? (uint8_t)(g.arc_leds - 1) : 1u;
     const float   half = 0.5f / (float)last;
 
-    /* Holding the row button: show the CV depth (bipolar from noon), white
-     * for positive, cyan for inverted. */
-    if (editing[s.row])
-    {
-        const float d  = cvDepth[s.row];
-        const float dn = 0.5f + 0.5f * d;
-        const Rgb   dc = (d >= 0.0f) ? kWhite : Rgb{0x00, 0xC0, 0xFF};
-        for (uint8_t i = 0; i < g.arc_leds; i++)
-        {
-            const float ln = (float)i / (float)last;
-            const bool lit = (dn >= 0.5f) ? (ln >= 0.5f - half && ln <= dn + half)
-                                          : (ln <= 0.5f + half && ln >= dn - half);
-            p.SetRingByHour(pot, g.start_hour + (float)i * g.step_hours,
-                            p.ScaleGlobal(lit ? dc : Rgb{0x06, 0x06, 0x06}));
-        }
-        return;
-    }
     const float phys = norm;
-    norm = modValue[s.row];   // effective value (held until the knob picks it up)
+    norm = CvNorm(modValue[s.row], pot);   // effective value (pickup hold + CV)
     for (uint8_t i = 0; i < g.arc_leds; i++)
     {
         const float hour = g.start_hour + (float)i * g.step_hours;
@@ -239,9 +269,7 @@ static void DrawModRing(LedPanel& p, uint8_t pot, const ArcGeometry& g,
             lit = ln <= norm + half;
         p.SetRingByHour(pot, hour, p.ScaleGlobal(lit ? s.color : LedPanel::Scale(s.color, 0.08f)));
     }
-    if (catching[s.row])   // knob not picked up yet: dim pip where it physically is
-        p.SetRingByHour(pot, g.start_hour + (float)(int)(phys * (float)last + 0.5f) * g.step_hours,
-                        p.ScaleGlobal(Rgb{0x50, 0x50, 0x50}));
+    DrawPhysPip(p, pot, g, phys, norm);
     if (s.clock_pip && clockPeriodSec > 0.0f && (t_ms - clockEdgeMs) < 50u)
         p.SetRingByHour(pot, 12.0f, p.ScaleGlobal(kWhite));
 }
@@ -251,11 +279,11 @@ static void DrawModRing(LedPanel& p, uint8_t pot, const ArcGeometry& g,
  * ═════════════════════════════════════════════════════════════════════════ */
 static VirtualKnob timeAmt  = VirtualKnob(kPotTopLeft, "Time")
     .Ident("time.amount")
-    .Help("Speed: CCW slows the tape to a stop, CW speeds it up to 2x (with reel inertia). Age: CCW tape, CW vinyl. 10-2 o'clock: off.")
+    .Help("Speed: CCW slows the tape to a stop, CW speeds it up to 2x (with reel inertia). Age: CCW tape, CW vinyl. Interval: CCW down a 5th / octave / octave+5th / 2 octaves, CW the same up. 10-2 o'clock: off.")
     .Ring(Custom(DrawAmountRing, &amountStyle[0]));
 static VirtualKnob timeMix  = VirtualKnob(kPotTopRight, "Mix")
     .Ident("time.mix")
-    .Help("Speed: dry/wet. Tape: wow and flutter. Vinyl: hiss, crackle and clicks.")
+    .Help("Speed: dry/wet. Tape: wow and flutter. Vinyl: hiss, crackle and clicks. Interval: dry/wet (noon = dry + shifted, a two-note chord).")
     .Ring(Custom(DrawModRing, &modStyle[0]));
 static VirtualKnob driveAmt = VirtualKnob(kPotMiddleLeft, "Drive")
     .Ident("drive.amount")
@@ -284,6 +312,16 @@ static Page mainPage = Page(0).Name("Athanor").Knobs(timeAmt, timeMix,
 static AlchemyLab     hw;
 static ControlLoop    loop(hw);
 static hostlink::Host host("athanor", "Athanor", ATHANOR_VERSION, ATHANOR_GIT_HASH);
+/* SD card: the recorder writes takes; HostLink's filesystem block lets the
+ * web programmer list / download them over USB. */
+static alchemy::SdCard               sdCard;
+static hostlink::FsExtension         fsExt(sdCard);
+static athanor::Recorder             recorder;
+
+/* Recording feedback on the three button LEDs (see OnRender). */
+enum class Flash : uint8_t { None, Started, Problem, Stopped, Dropout };
+static volatile Flash    flashKind = Flash::None;
+static volatile uint32_t flashMs   = 0;
 
 static constexpr uint16_t kBlock = 64;
 
@@ -313,6 +351,12 @@ static float           reelVel    = 0.0f;     // its rate of change (per second)
 static constexpr float kReelHz      = 1.6f;   // reel "spring": ~0.3 s to settle
 static constexpr float kReelDamping = 0.5f;   // < 1: overshoots ~16%, tape-like
 static constexpr float kMinPitch    = 0.02f;  // never quite 0 (fades still finish)
+static constexpr float kMaxPitch    = 4.6f;   // room for +2 oct (4x) plus overshoot
+static constexpr float kStepHz      = 7.0f;   // Interval: a quick reel, ~70 ms per step,
+static constexpr float kStepDamping = 0.75f;  //   with a hint of tape swoop
+static float           reelHz       = kReelHz;
+static float           reelDamping  = kReelDamping;
+static int             intervalStep = -1;     // current Interval step 0..3 (-1 = none)
 
 /* Row 3 state (audio thread only). */
 static float    spaceFbHeld   = 0.5f;   // reverb/delay feedback while another variant plays
@@ -341,9 +385,12 @@ struct SavedState
     uint8_t  v[3];
     uint8_t  version;
     uint32_t check;
-    int8_t   depth[3];   // v2: CV depth per row, -100..+100
+    int8_t   depth[3];   // v2: CV depth per row's LEFT knob, -100..+100
     uint8_t  pad;
     uint32_t check2;     // v2
+    int8_t   depthR[3];  // v3: CV depth per row's RIGHT knob
+    uint8_t  pad2;
+    uint32_t check3;     // v3
 };
 
 static uint32_t SaveCheck(const SavedState& s)
@@ -358,18 +405,36 @@ static uint32_t SaveCheck2(const SavedState& s)
     return h ^ s.check;
 }
 
+static uint32_t SaveCheck3(const SavedState& s)
+{
+    uint32_t h = 0x811C9DC5u;
+    for (int i = 0; i < 3; i++) h = (h ^ (uint8_t)s.depthR[i]) * 16777619u;
+    return h ^ s.check2 ^ 0xA5A5A5A5u;
+}
+
+static inline int8_t DepthToSave(float d)
+{
+    return (int8_t)(d * 100.0f + (d >= 0.0f ? 0.5f : -0.5f));
+}
+
 static void LoadVariants()
 {
     dsy_dma_invalidate_cache_for_buffer(reinterpret_cast<uint8_t*>(kSaveAddr), sizeof(SavedState));
     SavedState s;
     std::memcpy(&s, reinterpret_cast<const void*>(kSaveAddr), sizeof(s));
     if (s.magic != kSaveMagic || s.check != SaveCheck(s)) return;
-    if (s.version != 1 && s.version != 2) return;
+    if (s.version < 1 || s.version > 3) return;
     for (int r = 0; r < 3; r++)
         if (s.v[r] < kNumVariants[r]) variant[r] = s.v[r];
-    if (s.version == 2 && s.check2 == SaveCheck2(s))
+    if (s.version >= 2 && s.check2 == SaveCheck2(s))
+    {
+        /* v2 depths were the amount (left) knobs. */
         for (int r = 0; r < 3; r++)
-            cvDepth[r] = Clamp((float)s.depth[r] / 100.0f, -1.0f, 1.0f);
+            cvDepth[kAmtPot[r]] = Clamp((float)s.depth[r] / 100.0f, -1.0f, 1.0f);
+        if (s.version >= 3 && s.check3 == SaveCheck3(s))
+            for (int r = 0; r < 3; r++)
+                cvDepth[kModPot[r]] = Clamp((float)s.depthR[r] / 100.0f, -1.0f, 1.0f);
+    }
 }
 
 static void SaveVariants()
@@ -377,10 +442,12 @@ static void SaveVariants()
     SavedState s{};
     s.magic   = kSaveMagic;
     for (int r = 0; r < 3; r++) s.v[r] = variant[r];
-    s.version = 2;
+    s.version = 3;
     s.check   = SaveCheck(s);
-    for (int r = 0; r < 3; r++) s.depth[r] = (int8_t)(cvDepth[r] * 100.0f + (cvDepth[r] >= 0.0f ? 0.5f : -0.5f));
+    for (int r = 0; r < 3; r++) s.depth[r] = DepthToSave(cvDepth[kAmtPot[r]]);
     s.check2  = SaveCheck2(s);
+    for (int r = 0; r < 3; r++) s.depthR[r] = DepthToSave(cvDepth[kModPot[r]]);
+    s.check3  = SaveCheck3(s);
     hw.seed.qspi.Erase(kSaveAddr, kSaveAddr + 4096u);
     hw.seed.qspi.Write(kSaveAddr, sizeof(s), reinterpret_cast<uint8_t*>(&s));
     dsy_dma_invalidate_cache_for_buffer(reinterpret_cast<uint8_t*>(kSaveAddr), sizeof(s));
@@ -406,60 +473,114 @@ static void OnPoll(uint32_t t_ms)
     const float* phys = loop.Phys();
 
     /* Buttons. A tap (release without turning anything) steps that row to its
-     * next variant. Hold + turn the row's right-hand knob to set its CV depth:
-     * the modifier's own value is held meanwhile, and afterwards stays held
-     * until the knob is brought back to it (pickup), so nothing jumps. */
+     * next variant. Hold + turn either knob of the row to set that knob's CV
+     * depth: the first knob moved becomes the target for this hold. Its own
+     * value is held meanwhile, and afterwards stays held until the knob is
+     * brought back to it (pickup), so nothing jumps. */
+    static VirtualKnob* const kAmtKnob[3] = {&timeAmt, &driveAmt, &spaceAmt};
     for (int b = 0; b < 3; b++)
     {
-        Gesture& gs = gesture[b];
-        const float k = phys[kModPot[b]];
+        Gesture&      gs = gesture[b];
+        const uint8_t pa = kAmtPot[b], pm = kModPot[b];
+        const float   ka = phys[pa], km = phys[pm];
         if (hw.buttons[b].RisingEdge())
         {
-            gs.down   = true;
-            gs.edited = false;
-            gs.ref    = k;
-            gs.frozen = modValue[b];
+            gs.down      = true;
+            gs.target    = -1;
+            gs.consumed  = false;
+            gs.refAmt    = ka;
+            gs.refMod    = km;
+            gs.frozen[0] = amtValue[b];
+            gs.frozen[1] = modValue[b];
         }
-        if (gs.down && !gs.edited && std::fabs(k - gs.ref) > 0.02f)
+        if (gs.down && gs.target < 0 && !gs.consumed)
         {
-            gs.edited  = true;
-            editing[b] = true;
+            if (std::fabs(km - gs.refMod) > 0.02f)      gs.target = (int8_t)pm;
+            else if (std::fabs(ka - gs.refAmt) > 0.02f) gs.target = (int8_t)pa;
+            if (gs.target >= 0)
+            {
+                editing[b]           = gs.target;
+                catching[gs.target]  = false;
+            }
         }
-        if (gs.down && gs.edited)
+        if (gs.down && gs.target >= 0)
         {
-            float d = (k - 0.5f) * 2.0f;                  // -1..+1, noon = 0
+            float d = (phys[gs.target] - 0.5f) * 2.0f;    // -1..+1, noon = 0
             if (std::fabs(d) < 0.06f) d = 0.0f;           // detent at noon
             else d = (d > 0.0f) ? (d - 0.06f) / 0.94f : (d + 0.06f) / 0.94f;
-            cvDepth[b] = Clamp(d, -1.0f, 1.0f);
+            cvDepth[gs.target] = Clamp(d, -1.0f, 1.0f);
         }
         if (hw.buttons[b].FallingEdge() && gs.down)
         {
             gs.down = false;
-            if (gs.edited)
+            if (gs.target >= 0)
             {
-                editing[b]  = false;
-                catching[b] = true;
+                editing[b]          = -1;
+                catching[gs.target] = true;
+                dirtyMs = t_ms ? t_ms : 1u;
             }
-            else
+            else if (!gs.consumed)
             {
                 variant[b] = (uint8_t)((variant[b] + 1u) % kNumVariants[b]);
                 ApplyLooks();
+                dirtyMs = t_ms ? t_ms : 1u;
             }
-            dirtyMs = t_ms ? t_ms : 1u;
         }
 
-        /* Effective modifier value. */
-        if (editing[b] || catching[b])
-        {
-            modValue[b] = gs.frozen;
-            if (catching[b] && std::fabs(k - gs.frozen) < 0.025f) catching[b] = false;
-        }
-        else
-            modValue[b] = k;
+        /* Effective values: frozen while assigning / until picked up. */
+        const bool holdA = (editing[b] == (int8_t)pa) || catching[pa];
+        const bool holdM = (editing[b] == (int8_t)pm) || catching[pm];
+        amtValue[b] = holdA ? gs.frozen[0] : kAmtKnob[b]->Norm();
+        modValue[b] = holdM ? gs.frozen[1] : km;
+        if (catching[pa] && std::fabs(ka - gs.frozen[0]) < 0.025f) catching[pa] = false;
+        if (catching[pm] && std::fabs(km - gs.frozen[1]) < 0.025f) catching[pm] = false;
     }
 
-    /* CV inputs J4 / J5 / J6 -> amount offsets (5 ms smoothing, small dead
-     * zone so an unpatched jack's noise can't nudge anything). */
+    /* B1 + B3 held together for 0.5 s: start / stop SD recording. Neither
+     * button steps its variant on release. */
+    {
+        Gesture& g1 = gesture[0];
+        Gesture& g3 = gesture[2];
+        static uint32_t chordSinceMs = 0;
+        static bool     chordFired   = false;
+        const bool both = g1.down && g3.down && g1.target < 0 && g3.target < 0;
+        if (both)
+        {
+            g1.consumed = g3.consumed = true;   // a chord is never a tap
+            if (chordSinceMs == 0) chordSinceMs = t_ms ? t_ms : 1u;
+            if (!chordFired && (t_ms - chordSinceMs) >= 500u)
+            {
+                chordFired = true;
+                if (recorder.Active()) recorder.Stop();
+                else                   recorder.Start(t_ms);
+            }
+        }
+        else if (!g1.down && !g3.down)
+        {
+            chordSinceMs = 0;
+            chordFired   = false;
+        }
+    }
+    recorder.Poll(t_ms);
+    Flash fl = Flash::None;
+    switch (recorder.TakeEvent())
+    {
+        case athanor::Recorder::Event::Started:   fl = Flash::Started; break;
+        case athanor::Recorder::Event::Stopped:   fl = Flash::Stopped; break;
+        case athanor::Recorder::Event::Failed:
+        case athanor::Recorder::Event::CardError: fl = Flash::Problem; break;
+        case athanor::Recorder::Event::Dropout:   fl = Flash::Dropout; break;
+        default: break;
+    }
+    if (fl != Flash::None)
+    {
+        flashMs   = daisy::System::GetNow() | 1u;
+        flashKind = fl;
+    }
+
+    /* CV inputs J4 / J5 / J6 -> offsets for both knobs of their row (5 ms
+     * smoothing, small dead zone so an unpatched jack's noise can't nudge
+     * anything). */
     for (int r = 0; r < 3; r++)
     {
         float v = hw.cv_jacks[kCvJack[r]].Volts();
@@ -467,7 +588,8 @@ static void OnPoll(uint32_t t_ms)
         cvLp[r] += 0.2f * (v - cvLp[r]);
         float vv = cvLp[r];
         if (std::fabs(vv) < 0.04f) vv = 0.0f;
-        cvOffset[r] = cvDepth[r] * vv * 0.1f;
+        cvOffset[kAmtPot[r]] = cvDepth[kAmtPot[r]] * vv * 0.1f;
+        cvOffset[kModPot[r]] = cvDepth[kModPot[r]] * vv * 0.1f;
     }
     /* Save 1.5 s after the last change (one sector erase, ~50 ms). */
     if (dirtyMs != 0 && (t_ms - dirtyMs) > 1500u)
@@ -519,17 +641,53 @@ static void OnPoll(uint32_t t_ms)
 /* ═════════════════════════════════════════════════════════════════════════
  *  Button LEDs: the row's current variant colour (B3 doubles as CPU meter)
  * ═════════════════════════════════════════════════════════════════════════ */
+/* Recording status, briefly, on all three buttons:
+ *   two short red flashes   recording started
+ *   one long red flash      couldn't start (no card / not FAT32 / full) or
+ *                           the card failed mid-take (take closed)
+ *   one short white flash   stopped, take saved
+ *   one amber flash         the card fell behind and a moment was lost
+ *   a red blip every 3 s    still recording */
+static bool FlashColour(uint32_t now, Rgb& c)
+{
+    const Flash k = flashKind;
+    if (k != Flash::None)
+    {
+        const uint32_t t = now - flashMs;
+        bool on = false; uint32_t len = 0; Rgb col{0xFF, 0x00, 0x00};
+        switch (k)
+        {
+            case Flash::Started: on = (t < 130u) || (t >= 260u && t < 390u); len = 520u; break;
+            case Flash::Problem: on = t < 700u; len = 900u; break;
+            case Flash::Stopped: on = t < 160u; len = 300u; col = kWhite; break;
+            case Flash::Dropout: on = t < 400u; len = 600u; col = Rgb{0xFF, 0x80, 0x00}; break;
+            default: break;
+        }
+        if (t >= len) { flashKind = Flash::None; flashMs = 0; }
+        else { c = on ? col : Rgb{0, 0, 0}; return true; }
+    }
+    if (recorder.Recording() && ((now / 100u) % 30u) == 0u)
+    {
+        c = Rgb{0xFF, 0x00, 0x00};
+        return true;
+    }
+    return false;
+}
+
 static void OnRender(uint32_t /*t_ms*/)
 {
+    const uint32_t now = daisy::System::GetNow();
+    Rgb flash;
+    const bool flashing = FlashColour(now, flash);
     for (int b = 0; b < 3; b++)
     {
         Rgb c = LedPanel::Scale(kLooks[b][variant[b]].button, 0.35f);
         if (b == 2)
         {
-            const uint32_t now = daisy::System::GetNow();
             if (cpuAvg > 0.8f) c = Rgb{0xFF, 0x80, 0x00};
             if (overrunMs != 0 && (now - overrunMs) < 2000u) c = Rgb{0xFF, 0x00, 0x00};
         }
+        if (flashing) c = flash;
         hw.leds.SetButtonPair((uint8_t)b, hw.leds.ScaleGlobal(c));
     }
 }
@@ -584,41 +742,74 @@ static void AudioCallback(daisy::AudioHandle::InputBuffer  in,
     const int      v1 = variant[0], v2 = variant[1], v3 = variant[2];
 
     crash::Mark(crash::kAudioRow1);
-    /* ── Row 1: tape speed (Capicola pitch) / tape + vinyl ─────────── */
+    /* ── Row 1: tape speed (Capicola pitch) / tape + vinyl / interval ─ */
     int   tSide; float tAmt;
-    SplitAmount(Clamp(timeAmt.Norm() + cvOffset[0], 0.0f, 1.0f), tSide, tAmt);
-    const int   stSide = (v1 == 0) ? tSide : 0;
-    const float mod1   = modValue[0];
+    SplitAmount(CvNorm(amtValue[0], 0), tSide, tAmt);
+    const bool  reelRow = (v1 == 0) || (v1 == 2);     // variants on the pitch engine
+    const int   stSide  = reelRow ? tSide : 0;
+    const float mod1    = CvNorm(modValue[0], 1);
 
     /* Capicola's PITCH control with tape-reel inertia. The knob sets a target
-     * playback speed (CCW 1x -> stopped, CW 1x -> 2x); the speed actually
-     * played is a mass-spring-damper chasing it, so moves swoop like a heavy
-     * reel spinning up or down and overshoot a little. Timing stays locked to
-     * the input (Capicola's stretch grid and transient snapping do that).
-     * Releasing the knob back to neutral lets the reel spin back to 1x
-     * audibly before the row hands back to the dry signal. */
+     * playback speed; the speed actually played is a mass-spring-damper
+     * chasing it, so moves swoop like a heavy reel spinning up or down and
+     * overshoot a little. Timing stays locked to the input (Capicola's
+     * stretch grid and transient snapping do that). Releasing the knob back
+     * to neutral lets the reel spin back to 1x audibly before the row hands
+     * back to the dry signal.
+     *   Speed:    continuous. CCW 1x -> stopped, CW 1x -> 2x.
+     *   Interval: four steps per side, out to two octaves: a fifth, an
+     *             octave, an octave and a fifth, two octaves. The modifier
+     *             stays MIX, so the dry input plus the shifted copy plays
+     *             as a two-note chord. */
     float pitchTarget = 1.0f;
-    if (stSide < 0)      pitchTarget = 1.0f - tAmt;          // 1 -> 0 (tape stop)
-    else if (stSide > 0) pitchTarget = 1.0f + tAmt;          // 1 -> 2 (octave up)
+    if (v1 == 2)
+    {
+        static constexpr float kDown[4] = {2.0f / 3.0f, 0.5f, 1.0f / 3.0f, 0.25f};
+        static constexpr float kUp[4]   = {1.5f, 2.0f, 3.0f, 4.0f};
+        if (stSide != 0)
+        {
+            /* Four equal zones per side, with a little hysteresis so a knob
+             * (or CV) sitting on a border doesn't chatter between steps. */
+            const float z = tAmt * 4.0f;
+            int s = intervalStep;
+            if (s < 0 || z < (float)s - 0.08f || z > (float)(s + 1) + 0.08f)
+                s = (int)z;
+            if (s > 3) s = 3;
+            intervalStep = s;
+            pitchTarget  = (stSide < 0) ? kDown[s] : kUp[s];
+        }
+        else
+            intervalStep = -1;
+        reelHz      = kStepHz;
+        reelDamping = kStepDamping;
+    }
+    else
+    {
+        if (stSide < 0)      pitchTarget = 1.0f - tAmt;          // 1 -> 0 (tape stop)
+        else if (stSide > 0) pitchTarget = 1.0f + tAmt;          // 1 -> 2 (octave up)
+        if (v1 == 0) { reelHz = kReelHz; reelDamping = kReelDamping; }
+        intervalStep = -1;
+    }
     {
         const float dt = (float)n / sr;
-        const float w  = 2.0f * athanor::kPi * kReelHz;
-        reelVel += (w * w * (pitchTarget - reelPitch) - 2.0f * kReelDamping * w * reelVel) * dt;
+        const float w  = 2.0f * athanor::kPi * reelHz;
+        reelVel += (w * w * (pitchTarget - reelPitch) - 2.0f * reelDamping * w * reelVel) * dt;
         reelPitch += reelVel * dt;
         if (reelPitch < kMinPitch) { reelPitch = kMinPitch; if (reelVel < 0.0f) reelVel = 0.0f; }
-        if (reelPitch > 2.4f)      { reelPitch = 2.4f;      if (reelVel > 0.0f) reelVel = 0.0f; }
+        if (reelPitch > kMaxPitch) { reelPitch = kMaxPitch; if (reelVel > 0.0f) reelVel = 0.0f; }
     }
     stretch.SetPitch(reelPitch);
 
     const bool spinning = std::fabs(reelPitch - 1.0f) > 0.004f || std::fabs(reelVel) > 0.02f;
-    const bool active   = (v1 == 0) && (stSide != 0 || spinning);
+    const bool active   = reelRow && (stSide != 0 || spinning);
     if (active && !timeActive) stretch.Resync();     // engage from "now"
     timeActive = active;
 
     /* Near a full stop the tape runs out of level, like a real tape stop. */
     const float stopGain = Clamp(reelPitch / 0.12f, 0.0f, 1.0f);
     const float engage   = engageSm.Tick(active ? 1.0f : 0.0f);
-    const float wet      = engage * mixSm.Tick(v1 == 0 ? mod1 : mixSm.v);
+    const float mixT     = (v1 == 0 || v1 == 2) ? mod1 : mixSm.v;   // Speed / Interval: mix
+    const float wet      = engage * mixSm.Tick(mixT);
 
     static float wl[kBlock], wr[kBlock];
     float*       bl = out[0];
@@ -637,15 +828,15 @@ static void AudioCallback(daisy::AudioHandle::InputBuffer  in,
     crash::Mark(crash::kAudioDrive);
     /* ── Row 2: drive ────────────────────────────────────────────────── */
     int   dSide; float dAmt;
-    SplitAmount(Clamp(driveAmt.Norm() + cvOffset[1], 0.0f, 1.0f), dSide, dAmt);
-    drive.SetParams(v2, dSide, dAmt, modValue[1]);
+    SplitAmount(CvNorm(amtValue[1], 2), dSide, dAmt);
+    drive.SetParams(v2, dSide, dAmt, CvNorm(modValue[1], 3));
     drive.Process(bl, br, n);
 
     crash::Mark(crash::kAudioMod);
     /* ── Row 3: space / chorus + trem / phaser + flanger ─────────────── */
     int   sSide; float sAmt;
-    SplitAmount(Clamp(spaceAmt.Norm() + cvOffset[2], 0.0f, 1.0f), sSide, sAmt);
-    const float mod3 = modValue[2];
+    SplitAmount(CvNorm(amtValue[2], 4), sSide, sAmt);
+    const float mod3 = CvNorm(modValue[2], 5);
 
     {
         const int side = (v3 == 1) ? sSide : 0;
@@ -686,6 +877,7 @@ static void AudioCallback(daisy::AudioHandle::InputBuffer  in,
     {
         limiter.Process(bl[i], br[i]);
     }
+    recorder.Push(bl, br, n);   // final output -> SD ring (no-op when idle)
 
     crash::Mark(healthy ? (uint32_t)crash::kRunning : (uint32_t)crash::kFirstTick);
     cpu.OnBlockEnd();
@@ -787,6 +979,9 @@ int main()
     mixSm.Init(1.0f, 0.08f);
 
     limiter.Init(sr);
+    sdCard.Init();                      // owns volume "0:" (lazy, no disk I/O)
+    recorder.Init(&sdCard, (uint32_t)(sr + 0.5f));
+    host.Extend(fsExt);
     cpu.Init(sr, kBlock);
     ticksPerBlockInv = sr / ((float)daisy::System::GetTickFreq() * (float)kBlock);
 

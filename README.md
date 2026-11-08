@@ -6,16 +6,21 @@
 > **This repo has been made with the help of an LLM**
 
 **A performance effects firmware for the end of your chain, for the Hermetic Modular Alchemy Lab
-(V2).** Three stacked effect rows: tape speed (or tape/vinyl age), drive, and space. Each row is
+(V2).** Three stacked effect rows: tape speed (or tape/vinyl age, or musical intervals), drive, and space. Each row is
 played from one big knob, and that knob has a **wide neutral deadband from 10 to 2 o'clock**. Throw
 it back to the top and that effect is fully bypassed, so you can dive in and back out mid-set
 without hunting for "off".
+
+Athanor's layout is **inspired by Hermetic Modular's Spagyros**, the Alchemy Lab's own three-slot
+end-of-chain FX firmware: three rows in series, depth on the left, parameter on the right, a button
+to change the effect. No Spagyros code is used. See [Credits](#credits).
 
 The tape-speed row runs **[Capicola](https://github.com/heavylight-industries/capicola)'s keyframe
 engine by Heavylight Industries**. See [Credits](#credits).
 
 Each row has one **amount** knob on the left, one **modifier** knob on the right, a button that steps
-through that row's variants, and a CV input that modulates the amount knob.
+through that row's variants, and a CV input that can modulate either or both knobs. Hold **B1 + B3**
+to record the output to the SD card.
 
 ```
         LEFT (amount)   BUTTON   RIGHT (modifier)        CV in
@@ -29,6 +34,7 @@ Row 3   [P5] SPACE      B3       [P6] FEEDBACK / RATE    J6
 |---|---|---|---|---|
 | B1 | 1 Speed | tape slow-down to stop | tape speed-up to 2× | mix |
 | B1 | 2 Age | tape | vinyl | wow + flutter / hiss + clicks |
+| B1 | 3 Interval | down a 4th / octave / octave + 4th / 2 octaves | up a 5th / octave / octave + 5th / 2 octaves | mix |
 | B2 | 1 Saturation | analog | digital | tone |
 | B2 | 2 Distortion | analog | digital | tone |
 | B2 | 3 Fuzz | analog | digital | tone |
@@ -41,7 +47,7 @@ button. The button LED and that row's rings change colour to show which one you'
 selections (and CV depths) are saved about 1.5 s after the last change and come back at power-on.
 Switching variants crossfades, so you can do it live.
 
-Signal flow: **In → Speed / Age → Drive → Space → Out**, in stereo.
+Signal flow: **In → Speed / Age / Interval → Drive → Space → Out**, in stereo.
 
 ## The amount knobs
 
@@ -55,19 +61,22 @@ zone the row is bypassed, so you can throw the knob back to the top mid-performa
 
 ## CV modulation (J4 / J5 / J6)
 
-**J4**, **J5** and **J6** add to the **Time**, **Drive** and **Space** amount knobs. Each row's CV has
-its own depth, set like an attenuverter:
+**J4**, **J5** and **J6** feed rows 1, 2 and 3. Each jack can move **either or both knobs of its
+row**, each with its own depth, set like an attenuverter:
 
-- **Hold the row's button and turn its right-hand knob.** Noon = off, CW = positive depth, CCW =
-  inverted. While you hold, the ring switches to show the depth: white for positive, cyan for
-  inverted, with a detent at noon.
+- **Hold the row's button and turn the knob you want the CV to move.** The first knob you turn is
+  the one you're setting. Noon = off, CW = positive depth, CCW = inverted. While you hold, that
+  knob's ring shows the depth: white for positive, cyan for inverted, with a detent at noon.
+- To modulate both knobs, do it twice: hold + turn the left knob, release, then hold + turn the
+  right knob. One LFO can, say, push the drive up while pulling the tone down.
 - **Release.** The knob goes back to its normal job, but its value stays where it was until you turn
   the knob back to it (a dim pip shows where the knob physically is). So setting a depth never makes
-  the mix, tone or feedback jump.
-- **Depth range:** at full depth, ±5 V moves the virtual knob half its travel. A bipolar LFO can
-  sweep from one effect, through the bypass deadband, into the other. The amount ring follows the
-  modulated position, with a dim pip at the physical knob.
-- **Unpatched jacks** contribute nothing, and depths default to off.
+  the effect, mix, tone or feedback jump.
+- **Depth range:** at full depth, ±5 V moves the virtual knob half its travel. On an amount knob, a
+  bipolar LFO can sweep from one effect, through the bypass deadband, into the other. Both rings
+  follow the modulated position, with a dim pip at the physical knob.
+- **Unpatched jacks** contribute nothing, and depths default to off. Depths saved by v0.4 move to
+  the left knobs.
 
 ## Row 1, variant 1: Speed (Capicola's pitch control)
 
@@ -101,6 +110,32 @@ artefacts knob.
 | MIX | **More wow and flutter**: slow, irregular wow plus capstan flutter, with level wobble and the odd dropout near the top. Pitch swing goes from nothing, to about ±65 cents halfway, to over a semitone at full. | **More hiss, crackle and clicks** |
 
 The Speed engine keeps recording in the background, so switching back to it is instant.
+
+## Row 1, variant 3: Interval
+
+The same Capicola pitch engine and tape reel as Speed, but the amount knob **snaps to musical
+steps**, out to two octaves, on a **harmonic ladder**: every step is the input's own fifth or octave,
+so both directions add the same two notes and the chord stays rooted on what you play. Each side of
+the deadband is split into four equal zones:
+
+| Zone | CCW (down) | CW (up) | From a C |
+|---|---|---|---|
+| just past the deadband | a fourth (×3/4) | a fifth (×3/2) | G |
+| | an octave (×1/2) | an octave (×2) | C |
+| | an octave and a fourth (×3/8) | an octave and a fifth (×3) | G |
+| fully round | two octaves (×1/4) | two octaves (×4) | C |
+
+**MIX** works as on Speed: fully CW is only the shifted signal, and around noon you hear the incoming
+audio **plus** the shifted copy, so a fifth or an octave plays as a two-note chord. The intervals are
+pure (just intonation), so fifths ring cleanly against the dry note.
+
+- Moving between steps glides quickly (about 70 ms) on the tape reel, with a hint of swoop.
+- The zones have a little hysteresis, so a knob or CV sitting on a border doesn't chatter. Put CV
+  into J4 with some depth on the amount knob, and a stepped CV plays the intervals as a sequence.
+- The shifted copy is about 20 ms behind the dry signal (the engine's lookahead), which you can hear
+  as a slight thickening on sharp attacks.
+- Everything down to two octaves, and up to an octave, is clean. The top two up-steps (×3, ×4) have to
+  splice much more often and sound a little grainier, with a slight warble on sustained tones.
 
 ## Row 2: Drive
 
@@ -155,13 +190,38 @@ on every clock edge. The modulation variants use the same clock for their rates.
 
 ## Buttons
 
-Tap = next variant; hold + turn the right-hand knob = CV depth (see above). Each button LED shows its
+Tap = next variant; hold + turn a knob = that knob's CV depth (see above). Each button LED shows its
 row's current variant colour. B3 doubles as a CPU meter and overrides its colour when needed:
 
 - **Red**: an audio block overran in the last 2 seconds (real overload; you'd hear clicks).
 - **Amber**: average load is above 80% (close to the limit).
 
 The first 3 seconds after boot are ignored.
+
+## Recording to SD
+
+Hold **B1 and B3 together for half a second** to start recording; do it again to stop. Neither
+button changes its variant when you do this.
+
+- Records the **final stereo output** (after the limiter) as **24-bit / 48 kHz WAV**, at the card's
+  root: `REC0001.WAV`, `REC0002.WAV`, and so on. The card must be **FAT32**.
+- The WAV header is rewritten every 4 seconds, so if the power goes mid-take you keep everything up to
+  the last few seconds.
+- Download takes over USB from the web programmer's file view (the card can stay in the module), or
+  read the card on a computer. The take being recorded is locked against changes while it's open.
+
+The buttons tell you briefly what happened, all three at once:
+
+| Buttons | Meaning |
+|---|---|
+| **two short red flashes** | recording started |
+| a short red blip every 3 s | still recording |
+| **one short white flash** | stopped, take saved |
+| **one long red flash** | couldn't start (no card, not FAT32, card full), or the card failed mid-take (the take is closed and kept) |
+| one amber flash | the card fell behind and a moment was lost; recording carries on |
+
+The recorder buffers about 7 seconds in SDRAM, so ordinary cards keep up easily; amber flashes mean
+a slow or worn card. Takes stop automatically at the FAT32 4 GB limit (about 4 hours).
 
 ## Safe mode (crash report)
 
@@ -254,13 +314,19 @@ works for later updates without the button dance.
 | Saved variants | one QSPI sector at `0x907FF000` (top of the preset region) |
 | Capicola voicing (stretch, grain size, transient threshold, fade, shaper) | `src/stretch_engine.cpp` |
 | Reel inertia (speed row) | `kReelHz`, `kReelDamping`, `src/athanor.cpp` |
+| Interval steps and glide | `kDown` / `kUp`, `kStepHz`, `kStepDamping`, `src/athanor.cpp` |
+| SD recorder (buffer, chunk size, header sync) | `src/recorder.h`, `src/recorder.cpp` |
 | CV jacks, depth range, dead zone | `kCvJack`, `OnPoll()`, `src/athanor.cpp` |
-| Memory layout (reverb in internal SRAM) | `athanor.lds` (copy of the SDK script + `.d2_bss`) |
+| Memory layout (reverb in internal SRAM, SD DMA buffers) | `athanor.lds` (copy of the SDK script + `.d2_bss` and `.axi_bss`) |
 
 `tests/host_test.cpp` is a desktop sanity test for all the DSP (`make test`). The probes in
 `tests/` measure specific things:
 
 - `pitch_probe`: speed tracking and reel overshoot.
+- `interval_probe`: each Interval step lands in tune, and dry + shifted both come through at the
+  mix midpoint (runs in `make test`).
+- `rec_probe`: the SD recorder on the real FatFS and the SDK's RAM disk: sample-exact takes, power-cut
+  header sync, dropouts, card failure and recovery, and no unaligned DMA (runs in `make test`).
 - `wow_probe`: wow/flutter depth in cents.
 - `rev_probe`: reverb click detection.
 - `rev_balance_probe`: reverb left/right balance.
@@ -278,6 +344,9 @@ Full details, with file-level attribution, are in [CREDITS.md](CREDITS.md).
   and tabulated waveshapers. The sound of the Speed row, including the pitch behaviour it's modelled
   on, is the author's work; Athanor just puts it behind a deadbanded knob with reel inertia. If you
   like it, go and get the full Capicola firmware.
+- **Hermetic Modular's Spagyros**: the idea and panel layout Athanor builds on (three effect rows in
+  series, depth + parameter per row, a button per row to change effect, per-row depth CV). Concept
+  only; no Spagyros code is used.
 - **Hermetic Modular**: the Alchemy Lab hardware, the Alchemy SDK and the alchemy-template project
   this firmware started from.
 - **Electrosmith**: libDaisy.

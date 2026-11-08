@@ -1,0 +1,938 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Athanor Panel</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0d0e11;
+    --bg2: #15171c;
+    --ink: #f2efe8;
+    --muted: #9a978f;
+    --gold: #c9a45c;
+    --gold-hi: #f0cf86;
+    --panel: #0a0a0b;
+    --ui: rgba(20, 22, 27, 0.92);
+    --ui-line: rgba(255, 255, 255, 0.10);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
+    font-family: Inter, system-ui, -apple-system, Segoe UI, sans-serif; overflow: hidden; }
+  body.green { --bg: #00b140; }
+  body.black { --bg: #000; }
+
+  /* 1920x1080 stage, scaled to fit the window */
+  #viewport { position: fixed; inset: 0; overflow: hidden; background: var(--bg); }
+  #stage { position: absolute; left: 50%; top: 50%; width: 1920px; height: 1080px; transform-origin: center center;
+    background: radial-gradient(1200px 900px at 32% 50%, #1c1f26 0%, var(--bg) 70%); }
+  body.green #stage, body.black #stage { background: var(--bg); }
+  #svg { position: absolute; inset: 0; width: 1920px; height: 1080px; }
+
+  /* right-hand info column */
+  #info { position: absolute; left: 1196px; top: 110px; width: 680px; }
+  body.nocap #info { display: none; }
+  #stepno { font: 600 22px/1 Inter; letter-spacing: .18em; color: var(--gold); text-transform: uppercase; }
+  #title { font: 700 58px/1.05 "Barlow Condensed", "Roboto Condensed", "Arial Narrow", Inter, sans-serif; letter-spacing: .01em; margin: 16px 0 18px; }
+  #body { font: 400 26px/1.45 Inter; color: #d9d6cf; max-width: 680px; min-height: 120px; }
+  #body b { color: #fff; font-weight: 600; }
+  #body .k { display: inline-block; padding: 0 .35em; border: 1px solid rgba(255,255,255,.25); border-radius: 6px; font-size: .85em; }
+  #rows { margin-top: 34px; display: grid; gap: 14px; }
+  .row { display: grid; grid-template-columns: 84px 1fr; gap: 18px; align-items: center;
+    background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.08); border-radius: 14px; padding: 14px 18px; }
+  body.green .row, body.black .row { background: rgba(0,0,0,.55); }
+  .row .tag { font: 700 20px/1.15 "Barlow Condensed", "Roboto Condensed", "Arial Narrow", sans-serif; letter-spacing: .12em; color: var(--muted); white-space: nowrap; }
+  .row .name { font: 700 30px/1.1 "Barlow Condensed", "Roboto Condensed", "Arial Narrow", sans-serif; letter-spacing: .02em; }
+  .row .state { font: 500 21px/1.3 Inter; color: #cfcbc2; margin-top: 4px; }
+  .row .sw { display: inline-block; width: 13px; height: 13px; border-radius: 50%; margin-right: 8px; vertical-align: 2px;
+    box-shadow: 0 0 10px currentColor; background: currentColor; }
+  .row.active { border-color: rgba(201,164,92,.75); box-shadow: 0 0 0 1px rgba(201,164,92,.35), 0 0 30px rgba(201,164,92,.18); }
+  body.norows #rows { display: none; }
+
+  /* tags floating next to highlighted controls (stage px) */
+  .ptag { position: absolute; transform: translate(-50%, -50%); white-space: nowrap; pointer-events: none;
+    font: 700 22px/1 "Barlow Condensed", "Roboto Condensed", "Arial Narrow", sans-serif; letter-spacing: .1em; text-transform: uppercase;
+    color: #111; background: var(--gold-hi); padding: 7px 12px 6px; border-radius: 8px;
+    box-shadow: 0 6px 22px rgba(0,0,0,.45); opacity: 0; transition: opacity .35s; }
+  .ptag.on { opacity: 1; }
+  body.notags .ptag { display: none; }
+
+  /* section label: left of the panel, centred on the highlighted row */
+  #section { position: absolute; left: 496px; top: 0; transform: translate(-100%, -50%);
+    display: flex; flex-direction: column; align-items: flex-end; gap: 10px; pointer-events: none;
+    opacity: 0; transition: opacity .35s, top .45s cubic-bezier(.65,0,.35,1); }
+  #section.on { opacity: 1; }
+  #section .main { font: 700 48px/1 "Barlow Condensed", "Roboto Condensed", "Arial Narrow", sans-serif;
+    letter-spacing: .05em; text-transform: uppercase; text-align: right; max-width: 470px; color: #111;
+    background: var(--gold-hi); padding: 12px 20px 10px; border-radius: 12px;
+    box-shadow: 0 8px 28px rgba(0,0,0,.45); }
+  #section .row-n { font: 700 18px/1 Inter; letter-spacing: .2em; color: var(--gold-hi); text-transform: uppercase; }
+  #section .sub { font: 700 22px/1 "Barlow Condensed", "Roboto Condensed", "Arial Narrow", sans-serif; letter-spacing: .1em;
+    text-transform: uppercase; white-space: nowrap; color: #111; background: rgba(240,207,134,.82);
+    padding: 7px 12px 6px; border-radius: 8px; }
+  body.green #section .row-n { color: #111; background: var(--gold-hi); padding: 4px 8px; border-radius: 6px; }
+  body.nosection #section, body.nosection #rowBox { display: none; }
+
+  /* toolbar (outside the "recorded" look; hide with U) */
+  #bar { position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%); z-index: 10;
+    display: flex; gap: 6px; align-items: center; padding: 8px; background: var(--ui);
+    border: 1px solid var(--ui-line); border-radius: 12px; backdrop-filter: blur(8px); font-size: 13px; }
+  #bar button, #bar select { font: 500 13px Inter; color: var(--ink); background: #23262d; border: 1px solid var(--ui-line);
+    border-radius: 8px; padding: 7px 10px; cursor: pointer; }
+  #bar button:hover { background: #2c3038; }
+  #bar button { white-space: nowrap; }
+  #bar .sep { width: 1px; height: 22px; background: var(--ui-line); margin: 0 4px; }
+  #bar .lbl { color: var(--muted); padding: 0 4px; }
+  body.noui #bar, body.noui #help { display: none; }
+  #help { position: fixed; right: 14px; top: 14px; z-index: 10; width: 300px; padding: 14px 16px; background: var(--ui);
+    border: 1px solid var(--ui-line); border-radius: 12px; font-size: 12.5px; line-height: 1.55; color: #cfcbc2; display: none; }
+  #help.show { display: block; }
+  #help h3 { margin: 0 0 6px; font-size: 13px; color: #fff; }
+  #help kbd { font: 600 11px Inter; background: #2b2f37; border: 1px solid #3a3f48; border-radius: 4px; padding: 1px 5px; color: #fff; }
+
+  /* SVG interaction */
+  .knob, .btn, .jack { cursor: grab; }
+  .knob:active { cursor: grabbing; }
+  .btn, .jack { cursor: pointer; }
+  @media (prefers-reduced-motion: reduce) { .ptag { transition: none; } }
+</style>
+</head>
+<body>
+<div id="viewport">
+  <div id="stage">
+    <svg id="svg" viewBox="0 0 1920 1080" xmlns="http://www.w3.org/2000/svg" aria-label="Athanor front panel">
+      <defs>
+        <filter id="glow" x="-200%" y="-200%" width="500%" height="500%">
+          <feGaussianBlur stdDeviation="0.9" result="b1"/>
+          <feGaussianBlur stdDeviation="2.2" result="b2"/>
+          <feMerge><feMergeNode in="b2"/><feMergeNode in="b1"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+        <radialGradient id="knobCap" cx="40%" cy="35%" r="70%">
+          <stop offset="0" stop-color="#4a4d54"/>
+          <stop offset=".45" stop-color="#1d1f23"/>
+          <stop offset="1" stop-color="#0a0b0c"/>
+        </radialGradient>
+        <radialGradient id="knobSkirt" cx="50%" cy="50%" r="50%">
+          <stop offset=".7" stop-color="#121315"/>
+          <stop offset="1" stop-color="#050505"/>
+        </radialGradient>
+        <linearGradient id="nut" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stop-color="#e8e6e0"/>
+          <stop offset=".5" stop-color="#9c9a94"/>
+          <stop offset="1" stop-color="#d6d3cc"/>
+        </linearGradient>
+        <linearGradient id="panelGrad" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stop-color="#101012"/>
+          <stop offset="1" stop-color="#070708"/>
+        </linearGradient>
+        <pattern id="knurl" width="0.7" height="2" patternUnits="userSpaceOnUse">
+          <rect width="0.35" height="2" fill="#000" opacity=".35"/>
+        </pattern>
+        <filter id="rowGlow" x="-20%" y="-20%" width="140%" height="140%">
+          <feGaussianBlur stdDeviation="7" result="b"/>
+          <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+      </defs>
+      <g id="panelRoot"></g>
+      <g id="rowBox" style="pointer-events:none"></g>
+      <g id="hiRings" style="pointer-events:none"></g>
+    </svg>
+
+    <div id="tags"></div>
+    <div id="section"><div class="row-n"></div><div class="main"></div></div>
+
+    <div id="info">
+      <div id="stepno">Free play</div>
+      <div id="title">Athanor</div>
+      <div id="body">Performance effects for the end of your chain.</div>
+      <div id="rows"></div>
+    </div>
+  </div>
+</div>
+
+<div id="bar">
+  <button id="prev" title="Previous step (←)">◀</button>
+  <select id="stepSel" title="Jump to step"></select>
+  <button id="next" title="Next step (→ / Space)">▶</button>
+  <div class="sep"></div>
+  <button id="free" title="Free play: clear highlights (0)">Free play</button>
+  <button id="replay" title="Replay step animation (Enter)">Replay</button>
+  <div class="sep"></div>
+  <span class="lbl">BG</span>
+  <button data-bg="dark" title="Dark (D)">Dark</button>
+  <button data-bg="black" title="Black (K)">Black</button>
+  <button data-bg="green" title="Chroma green (G)">Green</button>
+  <div class="sep"></div>
+  <button id="tCap" title="Caption column (C)">Captions</button>
+  <button id="tRows" title="Row status cards (S)">Status</button>
+  <button id="tTags" title="Callout tags (T)">Tags</button>
+  <button id="tSec" title="Section label + row highlight (L)">Section</button>
+  <button id="tFull" title="Fullscreen (F)">Fullscreen</button>
+  <button id="tHelp" title="Help (?)">?</button>
+</div>
+
+<div id="help">
+  <h3>Controls</h3>
+  <kbd>→</kbd>/<kbd>Space</kbd> next step · <kbd>←</kbd> previous · <kbd>Enter</kbd> replay<br>
+  <kbd>0</kbd> free play (clear highlights) · <kbd>R</kbd> reset panel<br>
+  <b>Knobs:</b> drag up/down, or scroll. Double-click = noon.<br>
+  <b>Buttons:</b> click = tap (next variant).<br>
+  <b>CV depth:</b> hold <kbd>1</kbd>/<kbd>2</kbd>/<kbd>3</kbd> (B1/B2/B3) and drag that row's right knob, or <kbd>Shift</kbd>-drag the right knob.<br>
+  <b>Jacks:</b> click J3 for a 120 BPM clock, J4/J5/J6 for a slow ±5 V LFO.<br>
+  <b>Highlight:</b> <kbd>Alt</kbd>-click any control to spotlight it.<br>
+  <kbd>D</kbd> dark · <kbd>K</kbd> black · <kbd>G</kbd> green · <kbd>C</kbd> captions · <kbd>S</kbd> status · <kbd>T</kbd> tags · <kbd>L</kbd> section label · <kbd>U</kbd> hide toolbar · <kbd>F</kbd> fullscreen
+</div>
+
+<script>
+(() => {
+'use strict';
+
+/* ════════════════════════════════════════════════════════════════════════
+ *  Panel geometry: millimetres, taken from the Alchemy SDK KiCad panel
+ *  template (alchemy-sdk/panel/front-panel-template.kicad_pcb).
+ * ════════════════════════════════════════════════════════════════════════ */
+const PANEL = { x: 56.36, y: 32.1, w: 60.6, h: 128.5 };
+const SCALE = 7;                         // stage px per mm
+const ORIGIN = { x: 520, y: 90 };        // stage px of the panel's top-left
+const toStage = (mx, my) => ({ x: ORIGIN.x + (mx - PANEL.x) * SCALE, y: ORIGIN.y + (my - PANEL.y) * SCALE });
+
+const POTS = [
+  { id: 'P1', x: 69.16, y: 53.39, label: 'TIME' },
+  { id: 'P2', x: 104.16, y: 53.39, label: 'MIX' },
+  { id: 'P3', x: 69.16, y: 81.40, label: 'DRIVE' },
+  { id: 'P4', x: 104.16, y: 81.40, label: 'TONE' },
+  { id: 'P5', x: 69.16, y: 109.40, label: 'SPACE' },
+  { id: 'P6', x: 104.16, y: 109.40, label: 'FB · RATE' },
+];
+const BTNS = [
+  { id: 'B1', x: 86.66, y: 53.40 },
+  { id: 'B2', x: 86.66, y: 81.40 },
+  { id: 'B3', x: 86.66, y: 109.41 },
+];
+/* Jack field: top row y 132.2, bottom row y 145.15. Columns: in, J3/J4,
+ * J5/J6, J7/J8, out (the SDK's V2 layout). */
+const JACKS = [
+  { id: 'INL', x: 63.10, y: 132.18, label: 'IN L', kind: 'audio' },
+  { id: 'J3', x: 74.91, y: 132.18, label: 'CLOCK', kind: 'clock' },
+  { id: 'J5', x: 86.69, y: 132.21, label: 'DRV CV', kind: 'cv', row: 1 },
+  { id: 'J7', x: 98.42, y: 132.21, label: '—', kind: 'none' },
+  { id: 'OUTL', x: 110.31, y: 132.22, label: 'OUT L', kind: 'audio' },
+  { id: 'INR', x: 63.10, y: 145.14, label: 'IN R', kind: 'audio' },
+  { id: 'J4', x: 74.91, y: 145.15, label: 'TIME CV', kind: 'cv', row: 0 },
+  { id: 'J6', x: 86.69, y: 145.15, label: 'SPC CV', kind: 'cv', row: 2 },
+  { id: 'J8', x: 98.42, y: 145.15, label: '—', kind: 'none' },
+  { id: 'OUTR', x: 110.29, y: 145.13, label: 'OUT R', kind: 'audio' },
+];
+const USB = { x: 86.72, y: 123.37 };
+
+/* ════════════════════════════════════════════════════════════════════════
+ *  Firmware model (mirrors src/athanor.cpp)
+ * ════════════════════════════════════════════════════════════════════════ */
+const DEAD_LO = (10 - 7.5) / 9, DEAD_HI = (14 - 7.5) / 9;
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+function split(n) {
+  if (n < DEAD_LO) return { side: -1, amt: clamp((DEAD_LO - n) / DEAD_LO, 0, 1) };
+  if (n > DEAD_HI) return { side: 1, amt: clamp((n - DEAD_HI) / (1 - DEAD_HI), 0, 1) };
+  return { side: 0, amt: 0 };
+}
+const rgb = (r, g, b) => [r, g, b];
+const NUM_VARIANTS = [2, 3, 3];
+const LOOKS = [
+  [ { left: rgb(0x00,0x50,0xFF), right: rgb(0x00,0xFF,0x90), mod: rgb(0x40,0xA0,0xFF), button: rgb(0x00,0x90,0xFF), name: 'Speed',      l: 'Tape slow-down', r: 'Tape speed-up', m: 'Mix' },
+    { left: rgb(0xFF,0x60,0x10), right: rgb(0x20,0xC0,0xC0), mod: rgb(0xFF,0xB0,0x60), button: rgb(0xFF,0x70,0x20), name: 'Age',        l: 'Tape', r: 'Vinyl', m: 'Wow+flutter / hiss+clicks' } ],
+  [ { left: rgb(0xFF,0x60,0x00), right: rgb(0x00,0xA0,0xFF), mod: rgb(0x40,0xFF,0x40), button: rgb(0x40,0xFF,0x40), name: 'Saturation', l: 'Analog', r: 'Digital', m: 'Tone' },
+    { left: rgb(0xFF,0x60,0x00), right: rgb(0x00,0xA0,0xFF), mod: rgb(0xFF,0xA0,0x00), button: rgb(0xFF,0xA0,0x00), name: 'Distortion', l: 'Analog', r: 'Digital', m: 'Tone' },
+    { left: rgb(0xFF,0x60,0x00), right: rgb(0x00,0xA0,0xFF), mod: rgb(0xFF,0x10,0x10), button: rgb(0xFF,0x10,0x10), name: 'Fuzz',       l: 'Analog', r: 'Digital', m: 'Tone' } ],
+  [ { left: rgb(0x90,0x30,0xFF), right: rgb(0xFF,0xC0,0x10), mod: rgb(0xC0,0x80,0xFF), button: rgb(0x90,0x30,0xFF), name: 'Reverb / Delay',   l: 'Reverb', r: 'Delay → reverb', m: 'Feedback' },
+    { left: rgb(0x00,0xC0,0xFF), right: rgb(0xFF,0x30,0x80), mod: rgb(0x80,0xD0,0xFF), button: rgb(0x00,0xC0,0xFF), name: 'Chorus / Tremolo', l: 'Chorus', r: 'Tremolo', m: 'Rate' },
+    { left: rgb(0x40,0xFF,0x60), right: rgb(0xFF,0xF0,0x40), mod: rgb(0xC0,0xFF,0x80), button: rgb(0x80,0xFF,0x40), name: 'Phaser / Flanger', l: 'Phaser', r: 'Flanger', m: 'Rate' } ],
+];
+const NEUTRAL = rgb(0x30, 0x30, 0x30), WHITE = rgb(255, 255, 255), CYAN = rgb(0x00, 0xC0, 0xFF), PIP = rgb(0x50, 0x50, 0x50);
+const scale = (c, k) => c.map(v => v * k);
+
+/* State. knobs are physical norms 0..1. */
+const S = {
+  knobs: [0.5, 1, 0.5, 0.5, 0.5, 0.5],
+  variant: [0, 0, 0],
+  depth: [0, 0, 0],
+  editing: [false, false, false],
+  catching: [false, false, false],
+  frozen: [1, 0.5, 0.5],
+  patched: { J3: false, J4: false, J5: false, J6: false },
+  reel: 1, reelV: 0,
+  lfoT: 0, clkT: 0, clkFlash: 0,
+  scriptCV: [null, null, null],     // a step can drive a CV voltage directly
+};
+const MOD_POT = [1, 3, 5], AMT_POT = [0, 2, 4];
+const CV_JACK = ['J4', 'J5', 'J6'];
+
+function modValue(r) { return (S.editing[r] || S.catching[r]) ? S.frozen[r] : S.knobs[MOD_POT[r]]; }
+function cvVolts(r) {
+  if (S.scriptCV[r] !== null) return S.scriptCV[r];
+  if (!S.patched[CV_JACK[r]]) return 0;
+  return 5 * Math.sin(2 * Math.PI * (S.lfoT / 6 + r * 0.21));   // slow ±5 V LFO
+}
+function cvOffset(r) { return S.depth[r] * cvVolts(r) * 0.1; }
+function amountNorm(r) { return clamp(S.knobs[AMT_POT[r]] + cvOffset(r), 0, 1); }
+
+/* LFO rate model (RateFor in firmware). */
+const RATE_LO = [0.05, 0.5, 0.05, 0.03], RATE_HI = [3, 14, 4, 2];
+const DIV = [[0.125, 0.25, 0.5, 1], [0.5, 1, 1.5, 2, 3, 4, 6, 8], [0.0625, 0.125, 0.25, 0.5, 1], [0.0625, 0.125, 0.25, 0.5]];
+const CLOCK_PERIOD = 0.5;   // demo clock: 120 BPM
+function rateText(fx, m) {
+  if (S.patched.J3) {
+    const t = DIV[fx]; const i = Math.min(t.length - 1, Math.floor(m * t.length));
+    const c = t[i];
+    const frac = c >= 1 ? `${c} per beat` : `1 per ${Math.round(1 / c)} beats`;
+    return `${frac} (synced)`;
+  }
+  const hz = RATE_LO[fx] * Math.pow(RATE_HI[fx] / RATE_LO[fx], m);
+  return `${hz < 1 ? hz.toFixed(2) : hz.toFixed(1)} Hz`;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ *  Build the panel SVG
+ * ════════════════════════════════════════════════════════════════════════ */
+const NS = 'http://www.w3.org/2000/svg';
+const el = (tag, attrs = {}, parent) => {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+};
+const root = document.getElementById('panelRoot');
+const P = el('g', { transform: `translate(${ORIGIN.x - PANEL.x * SCALE} ${ORIGIN.y - PANEL.y * SCALE}) scale(${SCALE})` }, root);
+const GOLD = '#c9a45c';
+
+// shadow + body
+el('rect', { x: PANEL.x + 0.8, y: PANEL.y + 1.6, width: PANEL.w, height: PANEL.h, rx: 0.8, fill: '#000', opacity: .55, filter: 'url(#glow)' }, P);
+el('rect', { x: PANEL.x, y: PANEL.y, width: PANEL.w, height: PANEL.h, rx: 0.6, fill: 'url(#panelGrad)', stroke: GOLD, 'stroke-width': 0.35 }, P);
+el('rect', { x: PANEL.x + 1.4, y: PANEL.y + 1.4, width: PANEL.w - 2.8, height: PANEL.h - 2.8, rx: 0.4, fill: 'none', stroke: GOLD, 'stroke-width': 0.12, opacity: .45 }, P);
+// mounting slots
+for (const [x, y] of [[63.49, 35.09], [110.27, 35.10], [63.49, 157.59], [110.28, 157.60]]) {
+  el('rect', { x: x - 2.4, y: y - 1.6, width: 4.8, height: 3.2, rx: 1.6, fill: '#000', stroke: GOLD, 'stroke-width': 0.35 }, P);
+}
+// title
+const title = el('text', { x: 86.66, y: 40.2, 'text-anchor': 'middle', fill: GOLD, 'font-family': 'Barlow Condensed, Roboto Condensed, Arial Narrow, sans-serif', 'font-weight': 700, 'font-size': 5.4, 'letter-spacing': 0.9 }, P);
+title.textContent = 'ATHANOR';
+const sub = el('text', { x: 86.66, y: 43.6, 'text-anchor': 'middle', fill: GOLD, opacity: .7, 'font-family': 'Barlow Condensed, Roboto Condensed, Arial Narrow, sans-serif', 'font-weight': 600, 'font-size': 1.9, 'letter-spacing': 0.5 }, P);
+sub.textContent = 'PERFORMANCE EFFECTS · ALCHEMY LAB';
+
+// row guide lines (silkscreen)
+for (const y of [67.3, 95.3]) el('line', { x1: PANEL.x + 3, x2: PANEL.x + PANEL.w - 3, y1: y + 3.4, y2: y + 3.4, stroke: GOLD, 'stroke-width': 0.08, opacity: .35 }, P);
+el('line', { x1: PANEL.x + 3, x2: PANEL.x + PANEL.w - 3, y1: 127.3, y2: 127.3, stroke: GOLD, 'stroke-width': 0.08, opacity: .35 }, P);
+
+const silk = (x, y, txt, size = 2.25, anchor = 'middle', op = 1) => {
+  const t = el('text', { x, y, 'text-anchor': anchor, fill: GOLD, opacity: op, 'font-family': 'Barlow Condensed, Roboto Condensed, Arial Narrow, sans-serif', 'font-weight': 700, 'font-size': size, 'letter-spacing': 0.32 }, P);
+  t.textContent = txt; return t;
+};
+
+/* Knobs + LED rings */
+const RING_R = 8.25, LED_R = 0.62;
+const knobEls = [];
+POTS.forEach((p, i) => {
+  const g = el('g', { class: 'knob', 'data-id': p.id, 'data-i': i }, P);
+  // ring LEDs: 16 per ring, 0.75 h apart; 13-LED arc from 7:30 to 4:30
+  const leds = [];
+  for (let k = 0; k < 16; k++) {
+    const hour = 7.5 + 0.75 * k;
+    const a = (hour % 12) / 12 * 2 * Math.PI;
+    const lx = p.x + RING_R * Math.sin(a), ly = p.y - RING_R * Math.cos(a);
+    el('circle', { cx: lx, cy: ly, r: LED_R + 0.12, fill: '#16171a' }, g);
+    const glow = el('circle', { cx: lx, cy: ly, r: LED_R, fill: '#000', filter: 'url(#glow)', opacity: 0 }, g);
+    leds.push(glow);
+  }
+  // shaft nut + knob
+  el('circle', { cx: p.x, cy: p.y, r: 6.3, fill: 'url(#knobSkirt)' }, g);
+  el('circle', { cx: p.x, cy: p.y, r: 5.9, fill: '#141518', stroke: '#2a2c31', 'stroke-width': 0.2 }, g);
+  el('circle', { cx: p.x, cy: p.y, r: 5.9, fill: 'url(#knurl)', opacity: .9 }, g);
+  el('circle', { cx: p.x, cy: p.y, r: 4.7, fill: 'url(#knobCap)', stroke: '#3b3e45', 'stroke-width': 0.15 }, g);
+  const rot = el('g', {}, g);
+  el('line', { x1: p.x, y1: p.y - 1.2, x2: p.x, y2: p.y - 4.5, stroke: '#f4f1ea', 'stroke-width': 0.55, 'stroke-linecap': 'round' }, rot);
+  // hit area
+  el('circle', { cx: p.x, cy: p.y, r: 9.2, fill: 'transparent' }, g);
+  silk(p.x, p.y + 13.9, p.label);
+  knobEls.push({ g, leds, rot, p });
+});
+
+/* Buttons with top/bottom LEDs */
+const btnEls = [];
+BTNS.forEach((b, i) => {
+  const g = el('g', { class: 'btn', 'data-id': b.id, 'data-i': i }, P);
+  const top = el('circle', { cx: b.x, cy: b.y - 4.6, r: 0.55, fill: '#000', filter: 'url(#glow)' }, g);
+  const bot = el('circle', { cx: b.x, cy: b.y + 4.6, r: 0.55, fill: '#000', filter: 'url(#glow)' }, g);
+  el('circle', { cx: b.x, cy: b.y, r: 3.3, fill: '#0b0b0c', stroke: GOLD, 'stroke-width': 0.3 }, g);
+  const cap = el('circle', { cx: b.x, cy: b.y, r: 2.45, fill: '#1a1b1f', stroke: '#33363d', 'stroke-width': 0.15 }, g);
+  el('circle', { cx: b.x, cy: b.y, r: 5.5, fill: 'transparent' }, g);
+  silk(b.x, b.y + 10.9, 'B' + (i + 1), 2.0, 'middle', .85);
+  btnEls.push({ g, top, bot, cap, b });
+});
+
+/* USB-C */
+el('rect', { x: USB.x - 4.4, y: USB.y - 1.6, width: 8.8, height: 3.2, rx: 1.6, fill: '#000', stroke: '#8f8c86', 'stroke-width': 0.45 }, P);
+el('rect', { x: USB.x - 2.6, y: USB.y - 0.35, width: 5.2, height: 0.7, rx: 0.35, fill: '#3a3a3a' }, P);
+
+/* Jacks */
+const jackEls = {};
+JACKS.forEach(j => {
+  const g = el('g', { class: 'jack', 'data-id': j.id }, P);
+  const out = j.id === 'OUTL' || j.id === 'OUTR';
+  el('circle', { cx: j.x, cy: j.y, r: 4.0, fill: out ? '#2a2414' : 'none', stroke: out ? GOLD : 'none', 'stroke-width': 0.25 }, g);
+  const hex = []; for (let k = 0; k < 6; k++) { const a = Math.PI / 6 + k * Math.PI / 3; hex.push(`${j.x + 3.25 * Math.cos(a)},${j.y + 3.25 * Math.sin(a)}`); }
+  el('polygon', { points: hex.join(' '), fill: 'url(#nut)', stroke: '#6d6b66', 'stroke-width': 0.12 }, g);
+  el('circle', { cx: j.x, cy: j.y, r: 2.3, fill: '#bdb9b1' }, g);
+  el('circle', { cx: j.x, cy: j.y, r: 1.75, fill: '#050505' }, g);
+  const plug = el('g', { opacity: 0 }, g);
+  el('circle', { cx: j.x, cy: j.y, r: 2.9, fill: '#1b1c1f', stroke: '#444', 'stroke-width': 0.2 }, plug);
+  const cable = el('circle', { cx: j.x, cy: j.y, r: 1.9, fill: j.kind === 'clock' ? '#ffd23f' : '#ff4d8d' }, plug);
+  el('circle', { cx: j.x, cy: j.y, r: 0.7, fill: '#000', opacity: .5 }, plug);
+  silk(j.x, j.y + 5.75, j.label, 1.75, 'middle', j.kind === 'none' ? .45 : .95);
+  el('circle', { cx: j.x, cy: j.y, r: 4.3, fill: 'transparent' }, g);
+  jackEls[j.id] = { g, plug, cable, j };
+});
+
+/* Element registry for highlights: stage-space centre + radius */
+const REG = {};
+POTS.forEach(p => { const s = toStage(p.x, p.y); REG[p.id] = { x: s.x, y: s.y, r: 9.4 * SCALE }; });
+BTNS.forEach(b => { const s = toStage(b.x, b.y); REG[b.id] = { x: s.x, y: s.y, r: 5.6 * SCALE }; });
+JACKS.forEach(j => { const s = toStage(j.x, j.y); REG[j.id] = { x: s.x, y: s.y, r: 4.6 * SCALE }; });
+{ const s = toStage(USB.x, USB.y); REG.USB = { x: s.x, y: s.y, r: 5.2 * SCALE }; }
+const rowCentre = r => { const a = toStage(69.16, 53.4 + 28 * r), b = toStage(104.16, 53.4 + 28 * r); return { a, b }; };
+
+/* ════════════════════════════════════════════════════════════════════════
+ *  Rendering
+ * ════════════════════════════════════════════════════════════════════════ */
+const css = c => `rgb(${c.map(v => Math.round(clamp(v, 0, 255))).join(',')})`;
+function setLed(node, c) {
+  const lum = Math.max(c[0], c[1], c[2]);
+  if (lum < 2) { node.setAttribute('opacity', 0); return; }
+  // boost dim colours a little so "dim" LEDs read on video, as they do in a room
+  const k = lum < 40 ? Math.min(3.2, 40 / lum) : 1;
+  node.setAttribute('fill', css(scale(c, k)));
+  node.setAttribute('opacity', clamp(0.25 + lum / 255, 0.25, 1));
+}
+
+function drawAmountRing(r) {
+  const ke = knobEls[AMT_POT[r]];
+  const look = LOOKS[r][S.variant[r]];
+  const phys = S.knobs[AMT_POT[r]];
+  const norm = amountNorm(r);
+  const last = 12, ptr = Math.round(norm * last);
+  const neutral = norm >= DEAD_LO && norm <= DEAD_HI;
+  for (let i = 0; i < 16; i++) {
+    let c = [0, 0, 0];
+    if (i <= 12) {
+      const ln = i / last;
+      if (ln >= DEAD_LO - 1e-3 && ln <= DEAD_HI + 1e-3) c = (neutral && i === ptr) ? WHITE : scale(NEUTRAL, 0.5);
+      else if (ln < DEAD_LO) c = (norm < DEAD_LO && ln >= norm - 0.5 / last) ? look.left : scale(look.left, 0.08);
+      else c = (norm > DEAD_HI && ln <= norm + 0.5 / last) ? look.right : scale(look.right, 0.08);
+    }
+    setLed(ke.leds[i], c);
+  }
+  if (Math.abs(norm - phys) > 0.02) setLed(ke.leds[Math.round(phys * last)], PIP);
+  ke.rot.setAttribute('transform', `rotate(${-135 + 270 * phys} ${ke.p.x} ${ke.p.y})`);
+}
+
+function drawModRing(r) {
+  const ke = knobEls[MOD_POT[r]];
+  const look = LOOKS[r][S.variant[r]];
+  const phys = S.knobs[MOD_POT[r]];
+  const last = 12, half = 0.5 / last;
+  const bip = r === 1;
+  ke.rot.setAttribute('transform', `rotate(${-135 + 270 * phys} ${ke.p.x} ${ke.p.y})`);
+  if (S.editing[r]) {
+    const d = S.depth[r], dn = 0.5 + 0.5 * d, dc = d >= 0 ? WHITE : CYAN;
+    for (let i = 0; i < 16; i++) {
+      if (i > 12) { setLed(ke.leds[i], [0, 0, 0]); continue; }
+      const ln = i / last;
+      const lit = dn >= 0.5 ? (ln >= 0.5 - half && ln <= dn + half) : (ln <= 0.5 + half && ln >= dn - half);
+      setLed(ke.leds[i], lit ? dc : [6, 6, 6]);
+    }
+    return;
+  }
+  const norm = modValue(r);
+  for (let i = 0; i < 16; i++) {
+    if (i > 12) { setLed(ke.leds[i], [0, 0, 0]); continue; }
+    const ln = i / last;
+    const lit = bip ? (norm >= 0.5 ? (ln >= 0.5 - half && ln <= norm + half) : (ln <= 0.5 + half && ln >= norm - half))
+                    : ln <= norm + half;
+    setLed(ke.leds[i], lit ? look.mod : scale(look.mod, 0.08));
+  }
+  if (S.catching[r]) setLed(ke.leds[Math.round(phys * last)], PIP);
+  if (r === 2 && S.patched.J3 && S.clkFlash > 0) setLed(ke.leds[6], WHITE);   // 12 o'clock = LED 6
+}
+
+function drawButtons() {
+  btnEls.forEach((be, r) => {
+    const c = scale(LOOKS[r][S.variant[r]].button, 0.35);
+    setLed(be.top, c); setLed(be.bot, c);
+    be.cap.setAttribute('fill', heldBtn === r ? '#2d3038' : '#1a1b1f');
+  });
+}
+
+function drawJacks() {
+  for (const id in jackEls) {
+    const on = !!S.patched[id];
+    jackEls[id].plug.setAttribute('opacity', on ? 1 : 0);
+  }
+}
+
+/* Row status cards */
+const rowsEl = document.getElementById('rows');
+const rowCards = [0, 1, 2].map(r => {
+  const d = document.createElement('div'); d.className = 'row';
+  d.innerHTML = `<div class="tag">ROW ${r + 1}<br>B${r + 1}</div><div><div class="name"></div><div class="state"></div></div>`;
+  rowsEl.appendChild(d);
+  return { d, name: d.querySelector('.name'), state: d.querySelector('.state') };
+});
+const pct = v => Math.round(v * 100) + '%';
+function rowState(r) {
+  const v = S.variant[r], look = LOOKS[r][v];
+  const { side, amt } = split(amountNorm(r));
+  const m = modValue(r);
+  const sideName = side < 0 ? look.l : side > 0 ? look.r : null;
+  const col = side < 0 ? look.left : side > 0 ? look.right : NEUTRAL;
+  let text;
+  if (r === 0 && v === 0) {
+    const spin = Math.abs(S.reel - 1) > 0.004;
+    if (side === 0 && !spin) text = 'Bypassed';
+    else text = `${side === 0 ? 'Reel returning' : sideName} · speed ${S.reel.toFixed(2)}× · mix ${pct(m)}`;
+  } else if (side === 0) text = 'Bypassed';
+  else if (r === 0) text = `${sideName} · age ${pct(amt)} · ${side < 0 ? 'wow+flutter' : 'hiss+clicks'} ${pct(m)}`;
+  else if (r === 1) text = `${sideName} ${look.name.toLowerCase()} · ${pct(amt)} · tone ${m < 0.45 ? 'darker' : m > 0.55 ? 'brighter' : 'flat'}`;
+  else if (v === 0) text = side < 0 ? `Reverb · send ${pct(amt)} · decay ${pct(m)}`
+                                     : `Delay → reverb · send ${pct(amt)} · feedback ${pct(m)} · ${S.patched.J3 ? 'clocked' : '375 ms'}`;
+  else {
+    const fx = v === 1 ? (side < 0 ? 0 : 1) : (side < 0 ? 2 : 3);
+    text = `${sideName} · depth ${pct(amt)} · rate ${rateText(fx, m)}`;
+  }
+  if (S.depth[r] !== 0) text += ` · CV ${S.depth[r] > 0 ? '+' : '−'}${pct(Math.abs(S.depth[r]))}`;
+  return { name: look.name, text, col };
+}
+function drawRows() {
+  rowCards.forEach((c, r) => {
+    const st = rowState(r);
+    c.name.innerHTML = `<span class="sw" style="color:${css(LOOKS[r][S.variant[r]].button)}"></span>${st.name}`;
+    c.state.textContent = st.text;
+    c.d.classList.toggle('active', activeRows.has(r));
+  });
+}
+
+function render() {
+  for (let r = 0; r < 3; r++) { drawAmountRing(r); drawModRing(r); }
+  drawButtons(); drawJacks(); drawRows();
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ *  Simulation tick: reel inertia, LFOs, clock
+ * ════════════════════════════════════════════════════════════════════════ */
+function simulate(dt) {
+  S.lfoT += dt;
+  if (S.patched.J3) {
+    S.clkT += dt;
+    if (S.clkT >= CLOCK_PERIOD) { S.clkT -= CLOCK_PERIOD; S.clkFlash = 0.09; }
+  }
+  S.clkFlash = Math.max(0, S.clkFlash - dt);
+  // modifier pickup after a depth edit (firmware: within 2.5% of the held value)
+  for (let r = 0; r < 3; r++)
+    if (S.catching[r] && !S.editing[r] && Math.abs(S.knobs[MOD_POT[r]] - S.frozen[r]) < 0.025) S.catching[r] = false;
+  // reel: mass-spring-damper chasing the target speed (kReelHz 1.6, damping 0.5)
+  const { side, amt } = split(amountNorm(0));
+  const target = (S.variant[0] === 0) ? (side < 0 ? 1 - amt : side > 0 ? 1 + amt : 1) : 1;
+  const w = 2 * Math.PI * 1.6;
+  const steps = Math.max(1, Math.ceil(dt / 0.002));
+  const h = dt / steps;
+  for (let i = 0; i < steps; i++) {
+    S.reelV += (w * w * (target - S.reel) - 2 * 0.5 * w * S.reelV) * h;
+    S.reel += S.reelV * h;
+    if (S.reel < 0.02) { S.reel = 0.02; if (S.reelV < 0) S.reelV = 0; }
+  }
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ *  Highlights + tags
+ * ════════════════════════════════════════════════════════════════════════ */
+const hiRings = document.getElementById('hiRings');
+const tagsEl = document.getElementById('tags');
+let activeRows = new Set();
+let manualHi = new Set();
+
+function setHighlights(ids, tags) {
+  hiRings.innerHTML = ''; tagsEl.innerHTML = '';
+  const all = [...new Set([...(ids || []), ...manualHi])];
+  all.forEach(id => {
+    const g = REG[id]; if (!g) return;
+    const ring = el('circle', { cx: g.x, cy: g.y, r: g.r, fill: 'none', stroke: '#f0cf86', 'stroke-width': 3, opacity: .9 }, hiRings);
+    el('animate', { attributeName: 'r', values: `${g.r};${g.r + 7};${g.r}`, dur: '1.6s', repeatCount: 'indefinite' }, ring);
+    el('animate', { attributeName: 'opacity', values: '.95;.35;.95', dur: '1.6s', repeatCount: 'indefinite' }, ring);
+  });
+  (tags || []).forEach(t => {
+    const g = REG[t.id]; if (!g) return;
+    if (sectionRow !== null && t.pos === 'left' && /^P[135]$/.test(t.id)) return;   // shown under the section label
+    const off = { top: [0, -g.r - 26], bottom: [0, g.r + 26], left: [-g.r - 18, 0], right: [g.r + 18, 0] }[t.pos || 'top'];
+    const d = document.createElement('div'); d.className = 'ptag'; d.textContent = t.text;
+    d.style.left = (g.x + off[0]) + 'px'; d.style.top = (g.y + off[1]) + 'px';
+    if (t.pos === 'left') d.style.transform = 'translate(-100%, -50%)';
+    if (t.pos === 'right') d.style.transform = 'translate(0, -50%)';
+    tagsEl.appendChild(d);
+    requestAnimationFrame(() => d.classList.add('on'));
+  });
+}
+
+/* ── Section label + row highlight ───────────────────────────────────── */
+let sectionRow = null;          // row shown by the current step (null = none)
+let freeRow = null, freeRowT = 0; // row last touched in free play
+const sectionEl = document.getElementById('section');
+const sectionMain = sectionEl.querySelector('.main');
+const sectionN = sectionEl.querySelector('.row-n');
+const rowBoxG = document.getElementById('rowBox');
+let shownRow = null, shownSubs = '';
+
+function sectionLabel(r) {
+  const v = S.variant[r];
+  if (r === 0) {
+    if (v === 0) return 'Tape Stop';
+    const { side } = split(amountNorm(0));
+    return side < 0 ? 'Tape Sim' : side > 0 ? 'Vinyl Sim' : 'Tape / Vinyl Sim';
+  }
+  if (r === 1) return ['Saturation', 'Drive', 'Fuzz / Wavefolding'][v];
+  return ['Reverb / Delay', 'Chorus / Tremolo', 'Phaser / Flanger'][v];
+}
+
+function drawRowBox(r) {
+  rowBoxG.innerHTML = '';
+  if (r === null) return;
+  const yc = 53.4 + 28 * r;
+  const a = toStage(PANEL.x + 1.6, yc - 9.7), b = toStage(PANEL.x + PANEL.w - 1.6, yc + 16.2);
+  const box = el('rect', { x: a.x, y: a.y, width: b.x - a.x, height: b.y - a.y, rx: 16, fill: 'rgba(240,207,134,0.07)',
+    stroke: '#f0cf86', 'stroke-width': 3.5, filter: 'url(#rowGlow)' }, rowBoxG);
+  el('animate', { attributeName: 'stroke-opacity', values: '1;.55;1', dur: '2.2s', repeatCount: 'indefinite' }, box);
+  // connector from the label to the box
+  el('line', { x1: 500, y1: toStage(0, yc + 2.5).y, x2: a.x, y2: toStage(0, yc + 2.5).y, stroke: '#f0cf86', 'stroke-width': 3, 'stroke-linecap': 'round' }, rowBoxG);
+}
+
+function updateSection(nowMs) {
+  let r = sectionRow;
+  if (r === null && stepIdx < 0 && freeRow !== null && nowMs - freeRowT < 3500) r = freeRow;
+  if (r !== shownRow) {
+    shownRow = r;
+    drawRowBox(r);
+    sectionEl.classList.toggle('on', r !== null);
+    if (r !== null) {
+      const yc = toStage(0, 53.4 + 28 * r + 2.5).y;
+      sectionEl.style.top = yc + 'px';
+    }
+  }
+  if (r === null) return;
+  const label = sectionLabel(r);
+  if (sectionMain.textContent !== label) sectionMain.textContent = label;
+  const n = `Row ${r + 1} · B${r + 1}`;
+  if (sectionN.textContent !== n) sectionN.textContent = n;
+  // left-knob tags of the current step become sub-lines under the label
+  const subs = (stepIdx >= 0 && sectionRow !== null ? (STEPS[stepIdx].tags || []) : [])
+    .filter(t => t.pos === 'left' && /^P[135]$/.test(t.id)).map(t => t.text).join('|');
+  if (subs !== shownSubs) {
+    shownSubs = subs;
+    sectionEl.querySelectorAll('.sub').forEach(e => e.remove());
+    subs.split('|').filter(Boolean).forEach(t => { const d = document.createElement('div'); d.className = 'sub'; d.textContent = t; sectionEl.appendChild(d); });
+  }
+}
+const touchRow = r => { freeRow = r; freeRowT = performance.now(); };
+
+/* ════════════════════════════════════════════════════════════════════════
+ *  Timeline runner for scripted steps
+ * ════════════════════════════════════════════════════════════════════════ */
+let tweens = [], events = [], loops = [], tl = 0;
+const ease = t => t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+function getV(path) { const [k, i] = path.split('.'); return i === undefined ? S[k] : S[k][+i]; }
+function setV(path, v) { const [k, i] = path.split('.'); if (i === undefined) S[k] = v; else S[k][+i] = v; }
+const api = {
+  tween(path, to, dur = 900, delay = 0) { tweens.push({ path, to, dur, start: tl + delay, from: null }); return api; },
+  at(ms, fn) { events.push({ t: tl + ms, fn }); return api; },
+  loop(fn, delay = 0) { loops.push({ fn, start: tl + delay }); return api; },
+};
+function clearTimeline() { tweens = []; events = []; loops = []; }
+function runTimeline(dtMs) {
+  tl += dtMs;
+  for (const tw of tweens) {
+    if (tl < tw.start) continue;
+    if (tw.from === null) tw.from = getV(tw.path);
+    const p = clamp((tl - tw.start) / tw.dur, 0, 1);
+    setV(tw.path, tw.from + (tw.to - tw.from) * ease(p));
+    tw.done = p >= 1;
+  }
+  tweens = tweens.filter(t => !t.done);
+  for (const ev of events) if (!ev.fired && tl >= ev.t) { ev.fired = true; ev.fn(); }
+  events = events.filter(e => !e.fired);
+  for (const lp of loops) if (tl >= lp.start) lp.fn((tl - lp.start) / 1000);
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ *  Walkthrough steps (wording matches the README)
+ * ════════════════════════════════════════════════════════════════════════ */
+const N = { noon: 0.5, edgeL: DEAD_LO, edgeR: DEAD_HI, full: 1, zero: 0 };
+const base = (o = {}) => Object.assign({ knobs: [0.5, 1, 0.5, 0.5, 0.5, 0.5], variant: [0, 0, 0], depth: [0, 0, 0], patched: {} }, o);
+const STEPS = [
+  { title: 'Athanor', body: 'A <b>performance effects</b> firmware for the end of your chain, on the Hermetic Modular Alchemy Lab. Three effect rows, each played from one big knob.', state: base(), hi: [], rows: [] },
+  { title: 'Three rows, top to bottom', body: 'Audio flows <b>Speed → Drive → Space</b>. Left knob = <b>amount</b>, right knob = <b>modifier</b>, the button between them picks the row\'s <b>variant</b>.', state: base(),
+    hi: ['P1', 'P2', 'B1', 'P3', 'P4', 'B2', 'P5', 'P6', 'B3'], tags: [{ id: 'P1', text: 'Amount', pos: 'left' }, { id: 'P2', text: 'Modifier', pos: 'right' }, { id: 'B1', text: 'Variant', pos: 'top' }], rows: [0, 1, 2] },
+  { title: 'The deadband', body: 'From <b>10 to 2 o\'clock</b> the row is fully <b>bypassed</b>. Throw the knob back to the top mid-set and it\'s off: no hunting for zero. The dim grey LEDs mark the safe zone.', state: base(),
+    hi: ['P1', 'P3', 'P5'], tags: [{ id: 'P1', text: 'Bypass zone', pos: 'left' }], rows: [],
+    run: a => a.loop(t => { S.knobs[0] = 0.5 + 0.2 * Math.sin(t * 1.4); S.knobs[2] = 0.5 + 0.2 * Math.sin(t * 1.4 + 1); S.knobs[4] = 0.5 + 0.2 * Math.sin(t * 1.4 + 2); }, 300) },
+  { title: 'Leave the deadband…', body: 'Turn past <b>10 o\'clock</b> for the left flavour, past <b>2 o\'clock</b> for the right. The ring lights from the deadband edge out to the pointer, in that flavour\'s colour.', state: base(),
+    hi: ['P1'], tags: [{ id: 'P1', text: 'CCW · CW', pos: 'left' }], rows: [0],
+    run: a => a.tween('knobs.0', 0.12, 1100, 200).tween('knobs.0', 0.5, 900, 1700).tween('knobs.0', 0.9, 1100, 2900) },
+  { title: 'Speed: tape slow-down', body: 'Row 1 plays <b>Capicola\'s pitch control</b> (Heavylight Industries). CCW slows the tape from 1× to a <b>full stop</b>, pitch dropping like a reel winding down, with timing locked to your input.', state: base(),
+    hi: ['P1', 'P2'], tags: [{ id: 'P1', text: '1× → stop', pos: 'left' }, { id: 'P2', text: 'Mix', pos: 'right' }], rows: [0], section: 0,
+    run: a => a.tween('knobs.0', 0.08, 2600, 200) },
+  { title: 'Speed: tape speed-up', body: 'CW speeds the tape up to <b>2×</b>, an octave up. <b>MIX</b> blends dry and wet.', state: base({ knobs: [0.5, 1, 0.5, 0.5, 0.5, 0.5] }),
+    hi: ['P1'], tags: [{ id: 'P1', text: '1× → 2×', pos: 'left' }], rows: [0], section: 0,
+    run: a => a.tween('knobs.0', 0.97, 2000, 200) },
+  { title: 'Reel momentum', body: 'The knob sets a <b>target</b> speed; the tape chases it like a heavy reel: it swoops, <b>overshoots ~16%</b>, then settles. Snap back to the deadband and you hear it spin back to normal speed before it hands back to dry.', state: base({ knobs: [0.97, 1, 0.5, 0.5, 0.5, 0.5] }),
+    hi: ['P1'], tags: [{ id: 'P1', text: 'Watch the speed', pos: 'left' }], rows: [0], section: 0,
+    run: a => a.tween('knobs.0', 0.06, 160, 600).tween('knobs.0', 0.5, 160, 2400).tween('knobs.0', 0.95, 160, 4200).tween('knobs.0', 0.5, 160, 6000) },
+  { title: 'B1: Age, tape or vinyl', body: 'Tap <b>B1</b> for <b>Age</b>. The amount knob sets overall age: CCW <b>tape</b> (saturation, head bump, treble loss), CW <b>vinyl</b> (narrow band, mono-ing, crackle).', state: base({ variant: [1, 0, 0], knobs: [0.5, 0.1, 0.5, 0.5, 0.5, 0.5] }),
+    hi: ['B1', 'P1'], tags: [{ id: 'B1', text: 'Tap', pos: 'top' }], rows: [0], section: 0,
+    run: a => a.tween('knobs.0', 0.08, 1400, 300).tween('knobs.0', 0.92, 1800, 2400) },
+  { title: 'Wow, flutter, hiss, clicks', body: 'In Age, the right knob adds the <b>artefacts</b>: <b>wow and flutter</b> on tape (up to over a semitone of seasick), <b>hiss, crackle and clicks</b> on vinyl.', state: base({ variant: [1, 0, 0], knobs: [0.1, 0.05, 0.5, 0.5, 0.5, 0.5] }),
+    hi: ['P2'], tags: [{ id: 'P2', text: 'Artefacts', pos: 'right' }], rows: [0], section: 0,
+    run: a => a.tween('knobs.1', 0.95, 2200, 300) },
+  { title: 'Drive: analog or digital', body: 'Row 2. CCW is <b>analog</b>, CW is <b>digital</b>. <b>B2</b> picks the level: green <b>saturation</b>, orange <b>distortion</b>, red <b>fuzz</b>.', state: base({ knobs: [0.5, 1, 0.5, 0.5, 0.5, 0.5] }),
+    hi: ['P3', 'B2'], tags: [{ id: 'B2', text: 'Level', pos: 'top' }, { id: 'P3', text: 'Analog · Digital', pos: 'left' }], rows: [1], section: 1,
+    run: a => a.tween('knobs.2', 0.12, 1100, 200).at(1700, () => tapButton(1)).tween('knobs.2', 0.88, 1400, 2200).at(4000, () => tapButton(1)).tween('knobs.2', 0.15, 1400, 4400) },
+  { title: 'Tone', body: '<b>TONE</b> tilts the driven signal: <b>noon is flat</b>, CCW darker, CW brighter. The ring lights outward from noon.', state: base({ variant: [0, 2, 0], knobs: [0.5, 1, 0.12, 0.5, 0.5, 0.5] }),
+    hi: ['P4'], tags: [{ id: 'P4', text: 'Dark · Bright', pos: 'right' }], rows: [1], section: 1,
+    run: a => a.tween('knobs.3', 0.1, 1300, 200).tween('knobs.3', 0.9, 2000, 1700).tween('knobs.3', 0.5, 1100, 3900) },
+  { title: 'Space: reverb', body: 'Row 3. CCW sends into a <b>plate reverb</b> and ducks the dry. <b>FEEDBACK</b> sets the decay, from small room to near-freeze. Back in the deadband the sends close, but <b>tails ring out</b>.', state: base({ knobs: [0.5, 1, 0.5, 0.5, 0.5, 0.35] }),
+    hi: ['P5', 'P6'], tags: [{ id: 'P5', text: 'Send', pos: 'left' }, { id: 'P6', text: 'Decay', pos: 'right' }], rows: [2], section: 2,
+    run: a => a.tween('knobs.4', 0.07, 1500, 200).tween('knobs.5', 0.85, 1500, 1200) },
+  { title: 'Delay → reverb, on the clock', body: 'CW adds a <b>stereo delay</b> that feeds the plate; FEEDBACK sets the echoes. Patch a clock into <b>J3</b> and the delay time follows it. P6 blinks on each clock edge.', state: base({ knobs: [0.5, 1, 0.5, 0.5, 0.5, 0.6] }),
+    hi: ['P5', 'J3', 'P6'], tags: [{ id: 'J3', text: 'Clock in', pos: 'left' }], rows: [2], section: 2,
+    run: a => a.at(400, () => { S.patched.J3 = true; }).tween('knobs.4', 0.9, 1500, 600) },
+  { title: 'B3: chorus / tremolo', body: 'Tap <b>B3</b>. CCW <b>chorus</b>, CW <b>tremolo</b>, squaring up and going stereo near the end. The right knob becomes <b>RATE</b>, snapping to beat divisions when J3 is clocked.', state: base({ variant: [0, 0, 1], knobs: [0.5, 1, 0.5, 0.5, 0.5, 0.5], patched: { J3: true } }),
+    hi: ['B3', 'P5', 'P6'], tags: [{ id: 'P6', text: 'Rate', pos: 'right' }], rows: [2], section: 2,
+    run: a => a.tween('knobs.4', 0.15, 1200, 200).tween('knobs.4', 0.92, 1600, 1900).tween('knobs.5', 0.8, 1500, 2600) },
+  { title: 'B3: phaser / flanger', body: 'Tap again for <b>phaser</b> (CCW) and <b>flanger</b> (CW). Amount sets sweep width, feedback and mix together.', state: base({ variant: [0, 0, 2], knobs: [0.5, 1, 0.5, 0.5, 0.5, 0.3] }),
+    hi: ['B3', 'P5'], tags: [{ id: 'B3', text: 'Tap', pos: 'top' }], rows: [2], section: 2,
+    run: a => a.tween('knobs.4', 0.1, 1300, 200).tween('knobs.4', 0.9, 1700, 1900) },
+  { title: 'CV into every amount', body: '<b>J4 / J5 / J6</b> modulate the <b>Time, Drive and Space</b> amount knobs. A bipolar LFO can sweep from one effect, <b>through bypass</b>, into the other.', state: base({ knobs: [0.5, 1, 0.5, 0.5, 0.5, 0.5] }),
+    hi: ['J4', 'J5', 'J6'], tags: [{ id: 'J4', text: 'Time', pos: 'bottom' }, { id: 'J5', text: 'Drive', pos: 'top' }, { id: 'J6', text: 'Space', pos: 'bottom' }], rows: [0, 1, 2] },
+  { title: 'Set the CV depth', body: '<b>Hold the row button and turn its right knob</b>: noon is off, CW positive, CCW inverted. The ring shows the depth while held. Let go, and the knob\'s own value stays put until you turn it back to it.', state: base({ knobs: [0.5, 1, 0.5, 0.5, 0.5, 0.5] }),
+    hi: ['B1', 'P2', 'J4'], tags: [{ id: 'B1', text: 'Hold', pos: 'top' }, { id: 'P2', text: 'Depth', pos: 'right' }], rows: [0],
+    run: a => a.at(300, () => { S.patched.J4 = true; heldBtn = 0; S.frozen[0] = modValue(0); S.editing[0] = true; })
+      .loop(() => { if (S.editing[0]) S.depth[0] = depthFromKnob(S.knobs[1]); }, 300)
+      .tween('knobs.1', 0.62, 1200, 700)
+      .tween('knobs.1', 0.93, 1300, 2100)
+      .at(3800, () => { heldBtn = null; S.editing[0] = false; S.catching[0] = true; })
+      .tween('knobs.1', 1, 900, 4600) },
+  { title: 'Sweeping through the bypass', body: 'With depth set, the LFO on <b>J4</b> moves the virtual knob: the ring follows it through slow-down, <b>bypass</b>, and speed-up. A dim pip marks where the knob really is.', state: base({ knobs: [0.5, 1, 0.5, 0.5, 0.5, 0.5], depth: [0.9, 0, 0], patched: { J4: true } }),
+    hi: ['P1', 'J4'], tags: [{ id: 'P1', text: 'CV-driven', pos: 'left' }], rows: [0], section: 0 },
+  { title: 'Get it', body: 'Free and open source (AGPL-3.0). Download <b>athanor-vX.Y.Z.bin</b> from the GitHub releases and flash it with the Hermetic web programmer: hold <b>B3</b> at power-on to enter update mode.', state: base(),
+    hi: ['B3', 'USB'], tags: [{ id: 'B3', text: 'Hold at boot', pos: 'top' }, { id: 'USB', text: 'USB-C', pos: 'left' }], rows: [] },
+];
+
+/* ════════════════════════════════════════════════════════════════════════
+ *  Step control
+ * ════════════════════════════════════════════════════════════════════════ */
+let stepIdx = -1;
+const $ = id => document.getElementById(id);
+const stepSel = $('stepSel');
+STEPS.forEach((s, i) => { const o = document.createElement('option'); o.value = i; o.textContent = `${i + 1}. ${s.title}`; stepSel.appendChild(o); });
+
+function applyState(st, animate) {
+  clearTimeline();
+  S.editing = [false, false, false]; S.catching = [false, false, false];
+  S.scriptCV = [null, null, null];
+  S.variant = st.variant.slice();
+  S.depth = st.depth.slice();
+  S.patched = { J3: false, J4: false, J5: false, J6: false, ...st.patched };
+  st.knobs.forEach((v, i) => animate ? api.tween('knobs.' + i, v, 700) : (S.knobs[i] = v));
+  for (let r = 0; r < 3; r++) S.frozen[r] = st.knobs[MOD_POT[r]];
+}
+
+function goStep(i, opts = {}) {
+  i = clamp(i, 0, STEPS.length - 1);
+  stepIdx = i;
+  const s = STEPS[i];
+  manualHi.clear();
+  applyState(s.state, !opts.instant);
+  $('stepno').textContent = `Step ${i + 1} / ${STEPS.length}`;
+  $('title').textContent = s.title;
+  $('body').innerHTML = s.body;
+  activeRows = new Set(s.rows || []);
+  sectionRow = (s.section === undefined) ? null : s.section;
+  setHighlights(s.hi, s.tags);
+  stepSel.value = i;
+  if (s.run) s.run(api);
+}
+
+function freePlay() {
+  stepIdx = -1; clearTimeline(); manualHi.clear();
+  sectionRow = null; freeRow = null;
+  setHighlights([], []); activeRows = new Set();
+  $('stepno').textContent = 'Free play';
+  $('title').textContent = 'Athanor';
+  $('body').innerHTML = 'Drag the knobs, tap the buttons, click J3–J6 to patch. <b>Alt</b>-click anything to spotlight it.';
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ *  Interaction
+ * ════════════════════════════════════════════════════════════════════════ */
+let heldBtn = null, heldEdited = false, holdRef = 0;
+function tapButton(r) {
+  S.variant[r] = (S.variant[r] + 1) % NUM_VARIANTS[r];
+}
+function pressButton(r) {
+  heldBtn = r; heldEdited = false; holdRef = S.knobs[MOD_POT[r]];
+  S.frozen[r] = modValue(r);
+}
+function releaseButton(r) {
+  if (heldBtn !== r) return;
+  if (heldEdited) { S.editing[r] = false; S.catching[r] = true; }
+  else tapButton(r);
+  heldBtn = null; heldEdited = false;
+}
+function depthFromKnob(k) {
+  let d = (k - 0.5) * 2;
+  if (Math.abs(d) < 0.06) d = 0; else d = d > 0 ? (d - 0.06) / 0.94 : (d + 0.06) / 0.94;
+  return clamp(d, -1, 1);
+}
+function onKnobMoved(i, shift) {
+  const r = MOD_POT.indexOf(i);
+  if (r < 0) return;
+  if ((heldBtn === r) || shift) {
+    if (heldBtn !== r && shift) { if (!S.editing[r]) S.frozen[r] = modValue(r); }
+    if (heldBtn === r && !heldEdited && Math.abs(S.knobs[i] - holdRef) > 0.02) heldEdited = true;
+    if (heldBtn === r && !heldEdited) return;
+    S.editing[r] = true;
+    S.depth[r] = depthFromKnob(S.knobs[i]);
+    return;
+  }
+}
+
+const svg = $('svg');
+let drag = null;
+svg.addEventListener('pointerdown', e => {
+  const k = e.target.closest('.knob'), b = e.target.closest('.btn'), j = e.target.closest('.jack');
+  const id = (k || b || j) && (k || b || j).dataset.id;
+  if (e.altKey && id) { manualHi.has(id) ? manualHi.delete(id) : manualHi.add(id); setHighlights(stepIdx >= 0 ? STEPS[stepIdx].hi : [], stepIdx >= 0 ? STEPS[stepIdx].tags : []); return; }
+  if (k) {
+    clearTimeline();
+    const i = +k.dataset.i;
+    touchRow(Math.floor(i / 2));
+    drag = { i, y: e.clientY, v: S.knobs[i], shift: e.shiftKey };
+    svg.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  } else if (b) {
+    clearTimeline();
+    pressButton(+b.dataset.i);
+    touchRow(+b.dataset.i);
+    svg.setPointerCapture(e.pointerId);
+    drag = { btn: +b.dataset.i };
+  } else if (j) {
+    const jid = j.dataset.id;
+    if (jid in S.patched) { clearTimeline(); S.patched[jid] = !S.patched[jid]; S.scriptCV = [null, null, null]; }
+  }
+});
+svg.addEventListener('pointermove', e => {
+  if (!drag || drag.i === undefined) return;
+  const sc = stageScale();
+  const dv = -(e.clientY - drag.y) / (260 * sc);
+  S.knobs[drag.i] = clamp(drag.v + dv, 0, 1);
+  onKnobMoved(drag.i, drag.shift || e.shiftKey);
+});
+const endDrag = () => {
+  if (drag && drag.btn !== undefined) { releaseButton(drag.btn); touchRow(drag.btn); }
+  if (drag && drag.i !== undefined) touchRow(Math.floor(drag.i / 2));
+  if (drag && drag.i !== undefined && drag.shift) {
+    const r = MOD_POT.indexOf(drag.i);
+    if (r >= 0 && S.editing[r]) { S.editing[r] = false; S.catching[r] = true; }
+  }
+  drag = null;
+};
+svg.addEventListener('pointerup', endDrag);
+svg.addEventListener('pointercancel', endDrag);
+svg.addEventListener('dblclick', e => {
+  const k = e.target.closest('.knob'); if (!k) return;
+  clearTimeline(); S.knobs[+k.dataset.i] = 0.5; onKnobMoved(+k.dataset.i, false);
+});
+svg.addEventListener('wheel', e => {
+  const k = e.target.closest('.knob'); if (!k) return;
+  e.preventDefault(); clearTimeline();
+  const i = +k.dataset.i;
+  touchRow(Math.floor(i / 2));
+  S.knobs[i] = clamp(S.knobs[i] - Math.sign(e.deltaY) * 0.015, 0, 1);
+  onKnobMoved(i, e.shiftKey);
+}, { passive: false });
+
+/* keyboard */
+const keysHeld = new Set();
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'SELECT') return;
+  const k = e.key;
+  if (['1', '2', '3'].includes(k)) { if (!keysHeld.has(k)) { keysHeld.add(k); clearTimeline(); pressButton(+k - 1); touchRow(+k - 1); } return; }
+  if (k === 'ArrowRight' || k === ' ' || k === 'PageDown') { e.preventDefault(); goStep(stepIdx + 1); }
+  else if (k === 'ArrowLeft' || k === 'PageUp') { e.preventDefault(); goStep(stepIdx < 0 ? 0 : stepIdx - 1); }
+  else if (k === 'Enter') { if (stepIdx >= 0) goStep(stepIdx); }
+  else if (k === '0') freePlay();
+  else if (k === 'r' || k === 'R') { freePlay(); applyState(base(), true); }
+  else if (k === 'd' || k === 'D') setBg('dark');
+  else if (k === 'k' || k === 'K') setBg('black');
+  else if (k === 'g' || k === 'G') setBg('green');
+  else if (k === 'c' || k === 'C') document.body.classList.toggle('nocap');
+  else if (k === 's' || k === 'S') document.body.classList.toggle('norows');
+  else if (k === 't' || k === 'T') document.body.classList.toggle('notags');
+  else if (k === 'l' || k === 'L') document.body.classList.toggle('nosection');
+  else if (k === 'u' || k === 'U') document.body.classList.toggle('noui');
+  else if (k === 'f' || k === 'F') toggleFull();
+  else if (k === '?' || k === 'h' || k === 'H') $('help').classList.toggle('show');
+});
+document.addEventListener('keyup', e => {
+  const k = e.key;
+  if (['1', '2', '3'].includes(k)) { keysHeld.delete(k); releaseButton(+k - 1); touchRow(+k - 1); }
+});
+
+/* toolbar */
+$('prev').onclick = () => goStep(stepIdx < 0 ? 0 : stepIdx - 1);
+$('next').onclick = () => goStep(stepIdx + 1);
+$('free').onclick = freePlay;
+$('replay').onclick = () => stepIdx >= 0 && goStep(stepIdx);
+stepSel.onchange = () => goStep(+stepSel.value);
+document.querySelectorAll('[data-bg]').forEach(b => b.onclick = () => setBg(b.dataset.bg));
+$('tCap').onclick = () => document.body.classList.toggle('nocap');
+$('tRows').onclick = () => document.body.classList.toggle('norows');
+$('tTags').onclick = () => document.body.classList.toggle('notags');
+$('tSec').onclick = () => document.body.classList.toggle('nosection');
+$('tFull').onclick = toggleFull;
+$('tHelp').onclick = () => $('help').classList.toggle('show');
+function setBg(m) { document.body.classList.remove('green', 'black'); if (m !== 'dark') document.body.classList.add(m); }
+function toggleFull() { if (!document.fullscreenElement) document.documentElement.requestFullscreen?.(); else document.exitFullscreen?.(); }
+
+/* fit the 1920x1080 stage to the window */
+const stage = $('stage');
+function stageScale() { return Math.min(innerWidth / 1920, innerHeight / 1080); }
+function fit() { stage.style.transform = `translate(-50%, -50%) scale(${stageScale()})`; }
+addEventListener('resize', fit); fit();
+
+/* main loop */
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  runTimeline(dt * 1000);
+  simulate(dt);
+  render();
+  updateSection(now);
+  requestAnimationFrame(frame);
+}
+freePlay();
+goStep(0, { instant: true });
+requestAnimationFrame(frame);
+
+// expose for scripting / automation in OBS browser sources
+window.athanor = { goStep, freePlay, state: S, steps: STEPS };
+})();
+</script>
+</body>
+</html>

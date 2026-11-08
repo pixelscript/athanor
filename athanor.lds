@@ -145,6 +145,19 @@ SECTIONS
 		PROVIDE(__bss_end__ = _ebss);
 	} > DTCMRAM
 
+	/* SD-card DMA buffers (FatFS work area, FILs, staging). SDMMC1's IDMA
+	 * can't reach DTCM, so they live in AXI SRAM after the loaded image
+	 * (NOLOAD: zeroed by their owners, not by the bootloader). */
+	.axi_bss (NOLOAD) :
+	{
+		. = ALIGN(32);
+		_saxi_bss = .;
+		*(.axi_bss)
+		*(.axi_bss*)
+		. = ALIGN(32);
+		_eaxi_bss = .;
+	} > SRAM
+
 	.dtcmram_bss (NOLOAD) :
 	{
 		. = ALIGN(4);
