@@ -712,7 +712,11 @@ static void OnPoll(uint32_t t_ms)
         if (editing[b] != (int8_t)pm && catching[pm] && std::fabs(km - heldVal[pm]) < 0.025f) catching[pm] = false;
     }
 
-    /* B1 + B2 together: bypass all three rows / bring them back. Acts the
+    /* Two-button actions fire each time the pair becomes pressed together, so
+     * you can keep one button held and tap the other to repeat the action
+     * (a button that took part in one never steps its variant on release).
+     *
+     * B1 + B2 together: bypass all three rows / bring them back. Acts the
      * moment the second button goes down. J7 gate: bypassed while high. */
     {
         Gesture& g1 = gesture[0];
@@ -724,8 +728,8 @@ static void OnPoll(uint32_t t_ms)
             g1.consumed = g2.consumed = true;
             if (!chordHeld) { chordHeld = true; bypassLatch = !bypassLatch; }
         }
-        else if (!g1.down && !g2.down)
-            chordHeld = false;
+        else
+            chordHeld = false;   // either button up: the next press together fires again
 
         const float gv = hw.j7.Volts();
         if (!bypassGate && gv > kClkHiV)      bypassGate = true;
@@ -752,8 +756,8 @@ static void OnPoll(uint32_t t_ms)
                 debug.Info("Delay: %s", kDelayDivs[delayDiv].name);
             }
         }
-        else if (!g2.down && !g3.down)
-            chordHeld = false;
+        else
+            chordHeld = false;   // either button up: the next press together fires again
         if (delayDivShownMs != 0 && (t_ms - delayDivShownMs) >= 1200u) delayDivShownMs = 0;
     }
 
@@ -776,7 +780,7 @@ static void OnPoll(uint32_t t_ms)
                 else                   recorder.Start(t_ms);
             }
         }
-        else if (!g1.down && !g3.down)
+        else   // either button up: pressing together again starts a new hold
         {
             chordSinceMs = 0;
             chordFired   = false;

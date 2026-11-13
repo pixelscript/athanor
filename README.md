@@ -215,6 +215,18 @@ row's current variant colour. B3 doubles as a CPU meter and overrides its colour
 
 The first 3 seconds after boot are ignored.
 
+## Two-button presses
+
+Three actions use two buttons at once: **B1 + B2** bypass all, **B2 + B3** delay subdivision, and
+**B1 + B3** (held half a second) record. They work the same way:
+
+- The action fires when the second button goes down. A button that took part never changes its
+  variant when you let go.
+- **Keep one button held and tap the other to repeat the action.** Hold B2 and tap B3 to step through
+  the subdivisions one by one; hold B1 and tap B2 to punch the bypass in and out.
+- Recording still needs the pair held for half a second each time, so it can't be started by a stray
+  tap.
+
 ## Delay subdivision
 
 Press **B2 and B3 together** to step the delay to its next subdivision of the beat. It wraps round,
