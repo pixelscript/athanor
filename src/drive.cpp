@@ -39,6 +39,21 @@ constexpr float kFoldK = 0.5f * kPi;
 inline float FoldF(float u)  { return std::sin(kFoldK * u); }
 inline float FoldFA(float u) { return -std::cos(kFoldK * u) * (1.0f / kFoldK); }
 
+/* Rough ear weighting for the loudness match: lose the lows below ~100 Hz,
+ * lift the highs above ~1.7 kHz by about 4 dB (harsh harmonics sound louder
+ * than their RMS suggests). */
+inline float Weigh(float x, float& hp, float& sh)
+{
+    hp += 0.013f * (x - hp);
+    const float y = x - hp;
+    sh += 0.2f * (y - sh);
+    return y + 0.6f * (y - sh);
+}
+
+constexpr float kMakeupMin = 0.03f;   // -30 dB
+constexpr float kMakeupMax = 1.4f;    // +3 dB
+constexpr float kEnergyEps = 1.0e-7f;
+
 inline float Crush(float x, float bits)
 {
     const float q = std::exp2(bits - 1.0f);
@@ -66,6 +81,12 @@ void Drive::Init(float sr)
     amt_.Init(0.0f, k);
     gl_.Init(1.0f, k);
     gh_.Init(1.0f, k);
+
+    e_k_      = 1.0f - std::exp(-1.0f / (0.08f * sr));    // 80 ms loudness window
+    makeup_k_ = 1.0f - std::exp(-1.0f / (0.02f * sr));    // 20 ms gain smoothing
+    e_in_ = e_out_ = 0.0f;
+    makeup_ = 1.0f;
+    was_on_ = false;
 }
 
 void Drive::SetParams(int level, int side, float amount, float tone)
@@ -183,10 +204,15 @@ void Drive::Process(float* l, float* r, std::size_t n)
         }
 
         float* io[2] = {&l[i], &r[i]};
+        float  wet[2] = {0.0f, 0.0f};
+        float  mm[2]  = {0.0f, 0.0f};
+        float  ein = 0.0f, eout = 0.0f;
         for (int c = 0; c < 2; c++)
         {
             Chan&       ch = ch_[c];
             const float x  = *io[c];
+            const float xi = Weigh(x, ch.wi_hp, ch.wi_sh);   // input loudness: always tracked
+            ein += xi * xi;
             float shaped = 0.0f, m = 0.0f;
             for (int k = 0; k < kLevels; k++)
             {
@@ -199,10 +225,41 @@ void Drive::Process(float* l, float* r, std::size_t n)
                 else if (k == 0) ch.clip.Idle();
                 else if (k == 2) ch.fold.Idle();
             }
+            mm[c] = m;
             if (m <= 1.0e-4f) { ch.tilt.Tick(0.0f); ch.dc.Tick(0.0f); continue; }
-            const float lo  = ch.tilt.Tick(shaped);
-            const float wet = ch.dc.Tick(lo * gl + (shaped - lo) * gh);
-            *io[c] = x * (1.0f - (m > 1.0f ? 1.0f : m)) + wet;
+            const float lo = ch.tilt.Tick(shaped);
+            /* `shaped` carries the mix weight m; measure the full-strength
+             * driven signal so the match doesn't chase the fade-in. */
+            wet[c] = ch.dc.Tick(lo * gl + (shaped - lo) * gh);
+            const float full = wet[c] / (m > 1.0f ? 1.0f : m);
+            const float yo   = Weigh(full, ch.wo_hp, ch.wo_sh);
+            eout += yo * yo;
+        }
+
+        /* Loudness match: one gain for both channels. */
+        e_in_ += e_k_ * (ein - e_in_);
+        const bool on = (mm[0] > 1.0e-4f) || (mm[1] > 1.0e-4f);
+        if (on)
+        {
+            if (!was_on_)
+            {
+                /* Engaging: assume the drive is louder than the input until
+                 * it has been measured, so it fades up rather than blasts. */
+                e_out_  = e_in_ * (t_lvl_w_[0] > 0.5f ? 2.5f : 16.0f);
+                makeup_ = std::sqrt((e_in_ + kEnergyEps) / (e_out_ + kEnergyEps));
+            }
+            e_out_ += e_k_ * (eout - e_out_);
+            const float want = Clamp(std::sqrt((e_in_ + kEnergyEps) / (e_out_ + kEnergyEps)),
+                                     kMakeupMin, kMakeupMax);
+            makeup_ += makeup_k_ * (want - makeup_);
+        }
+        was_on_ = on;
+
+        for (int c = 0; c < 2; c++)
+        {
+            if (mm[c] <= 1.0e-4f) continue;
+            const float m = mm[c] > 1.0f ? 1.0f : mm[c];
+            *io[c] = *io[c] * (1.0f - m) + makeup_ * wet[c];
         }
     }
 }

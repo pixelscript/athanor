@@ -11,6 +11,12 @@
  *
  * Analog shapers are ADAA anti-aliased; the digital ones alias on purpose.
  * TONE is a tilt EQ on the driven signal (noon flat). Level changes crossfade.
+ *
+ * Loudness matching: the driven signal is turned down (or up a little) so it
+ * comes out about as loud as what went in, whatever the level, flavour,
+ * amount and tone. Both loudnesses are measured continuously (ear-weighted,
+ * ~80 ms) and one gain is shared by left and right. Sweeping into a drive
+ * changes the sound, not the volume.
  */
 #pragma once
 
@@ -38,6 +44,8 @@ class Drive
         OnePoleLp tilt;
         DcBlock   dc, fuzz_dc;
         float     hold[kLevels] = {0.0f, 0.0f, 0.0f};   // sample & hold (digital)
+        float     wi_hp = 0.0f, wi_sh = 0.0f;           // loudness weighting: input
+        float     wo_hp = 0.0f, wo_sh = 0.0f;           //   and driven signal
     };
 
     float Analog(int level, Chan& c, float x, float a);
@@ -52,6 +60,11 @@ class Drive
     float  t_lvl_w_[kLevels] = {1.0f, 0.0f, 0.0f};
     float  t_mix_a_ = 0.0f, t_mix_d_ = 0.0f, t_amt_ = 0.0f;
     float  t_gl_ = 1.0f, t_gh_ = 1.0f;
+
+    /* Loudness matching (stereo-linked). */
+    float  e_in_ = 0.0f, e_out_ = 0.0f, e_k_ = 0.0f;
+    float  makeup_ = 1.0f, makeup_k_ = 0.0f;
+    bool   was_on_ = false;
 };
 
 } // namespace athanor

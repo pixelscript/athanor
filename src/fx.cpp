@@ -177,6 +177,8 @@ void Space::Init(float sr, float* plate_mem, float* dly_l, float* dly_r)
     dly_target_ = 0.375f * sr;
     /* Delay time glides (~120 ms) so clock changes sound like tape, not clicks. */
     dly_time_.Init(dly_target_, 1.0f - std::exp(-1.0f / (0.12f * sr)));
+    xf_     = 0.0f;
+    xf_dec_ = 1.0f / (0.06f * sr);   // 60 ms crossfade between subdivisions
 
     const float k = 1.0f - std::exp(-1.0f / (0.01f * sr));   // 10 ms
     rev_send_.Init(0.0f, k);
@@ -186,12 +188,43 @@ void Space::Init(float sr, float* plate_mem, float* dly_l, float* dly_r)
     dly_fb_.Init(0.0f, k);
 }
 
-void Space::SetDelaySeconds(float s)
+void Space::SetDelaySeconds(float s, bool crossfade)
 {
     /* Too-long clocks halve until they fit the buffer. */
     while (s > kMaxDelaySec) s *= 0.5f;
     if (s < 0.02f) s = 0.02f;
-    dly_target_ = s * sr_;
+    const float target = s * sr_;
+    if (xf_has_pend_)
+    {
+        /* A change is already waiting for the running crossfade to finish:
+         * just keep its destination up to date. */
+        xf_pend_ = target;
+        return;
+    }
+    if (crossfade && target != dly_target_)
+    {
+        if (xf_ > 0.0f)
+        {
+            /* Still crossfading from the last change. Restarting now would
+             * drop a tap that is still audible (a click), so queue this one. */
+            xf_pend_     = target;
+            xf_has_pend_ = true;
+            return;
+        }
+        StartCrossfade(target);
+        return;
+    }
+    dly_target_ = target;
+}
+
+/* Keep reading the old time while it fades out; the new tap starts at the new
+ * time straight away (no glide, so no pitch swoop). */
+void Space::StartCrossfade(float target)
+{
+    xf_old_     = dly_time_.v;
+    xf_         = 1.0f;
+    dly_time_.v = target;
+    dly_target_ = target;
 }
 
 void Space::SetParams(int side, float amount, float modifier)
@@ -241,8 +274,24 @@ void Space::Process(float* l, float* r, std::size_t n)
         if (dt > (float)(kDelayFloats - 4)) dt = (float)(kDelayFloats - 4);
 
         /* Stereo delay, 25% cross-feed in the loop for width. */
-        const float yl = dl_[0].TapF(dt);
-        const float yr = dl_[1].TapF(dt);
+        float yl = dl_[0].TapF(dt);
+        float yr = dl_[1].TapF(dt);
+        if (xf_ > 0.0f)
+        {
+            const float g = xf_ * xf_ * (3.0f - 2.0f * xf_);   // smooth old-tap weight
+            yl += g * (dl_[0].TapF(xf_old_) - yl);
+            yr += g * (dl_[1].TapF(xf_old_) - yr);
+            xf_ -= xf_dec_;
+            if (xf_ <= 0.0f)
+            {
+                xf_ = 0.0f;
+                if (xf_has_pend_)
+                {
+                    xf_has_pend_ = false;
+                    if (xf_pend_ != dly_target_) StartCrossfade(xf_pend_);
+                }
+            }
+        }
         const float fl = dl_dc_[0].Tick(dl_lp_[0].Tick(0.75f * yl + 0.25f * yr));
         const float fr = dl_dc_[1].Tick(dl_lp_[1].Tick(0.75f * yr + 0.25f * yl));
         dl_[0].Write(LoopClip(l[i] * ds + fl * fb));

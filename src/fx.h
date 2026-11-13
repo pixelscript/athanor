@@ -210,7 +210,10 @@ class Space
 
     void Init(float sr, float* plate_mem, float* dly_l, float* dly_r);
     void SetParams(int side, float amount, float modifier);
-    void SetDelaySeconds(float s);
+    /** Tempo changes glide like tape. With `crossfade` the delay switches to
+     *  the new time through a short crossfade instead (no pitch swoop): for
+     *  changing subdivision. */
+    void SetDelaySeconds(float s, bool crossfade = false);
     void Process(float* l, float* r, std::size_t n);
     /** Peak of the wet (reverb + echo) output over the last Process(). */
     float WetPeak() const { return wet_peak_; }
@@ -225,6 +228,12 @@ class Space
     OnePoleLp rev_hp_;
     float     dly_target_ = 18000.0f;
     Smooth    dly_time_;
+    float     xf_old_ = 18000.0f;   // previous delay time, fading out
+    float     xf_ = 0.0f;           // 1 -> 0 while crossfading
+    float     xf_dec_ = 0.0f;
+    float     xf_pend_ = 0.0f;      // a change that arrived mid-crossfade, applied when it ends
+    bool      xf_has_pend_ = false;
+    void      StartCrossfade(float target);
 
     Smooth rev_send_, dly_send_, dly_to_rev_, dry_, dly_fb_;
     float  t_rev_send_ = 0.0f, t_dly_send_ = 0.0f, t_dly_to_rev_ = 0.0f;
