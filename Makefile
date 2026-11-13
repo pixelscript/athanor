@@ -27,6 +27,7 @@ CPP_SOURCES = \
     src/drive.cpp \
     src/modfx.cpp \
     src/recorder.cpp \
+    src/shifter.cpp \
     src/crashlog.cpp
 
 # ── Alchemy SDK, compiled straight from the submodule ───────────────────────
@@ -87,9 +88,12 @@ test:
 	    src/fx.cpp src/drive.cpp src/age.cpp src/modfx.cpp src/stretch_engine.cpp \
 	    -o build/host_test
 	./build/host_test
-	$(HOST_CXX) -O2 -std=c++17 -Itests/stub -Isrc -Idsp tests/interval_probe.cpp \
-	    src/stretch_engine.cpp -o build/interval_probe
-	./build/interval_probe
+	$(HOST_CXX) -O2 -std=c++17 -Isrc tests/shift_probe.cpp src/shifter.cpp -o build/shift_probe
+	./build/shift_probe
+	$(HOST_CXX) -O2 -std=c++17 -Isrc tests/div_probe.cpp src/fx.cpp -o build/div_probe
+	./build/div_probe
+	$(HOST_CXX) -O2 -std=c++17 -Isrc tests/clock_probe.cpp -o build/clock_probe
+	./build/clock_probe
 	$(HOST_CXX) -O2 -std=c++17 -Isrc tests/midi_clock_probe.cpp -o build/midi_clock_probe
 	./build/midi_clock_probe
 	@# SD recorder on the real FatFS + the SDK's RAM disk (asserts aligned DMA).

@@ -20,7 +20,8 @@ engine by Heavylight Industries**. See [Credits](#credits).
 
 Each row has one **amount** knob on the left, one **modifier** knob on the right, a button that steps
 through that row's variants, and a CV input that can modulate either or both knobs. Hold **B1 + B3**
-to record the output to the SD card, press **B1 + B2** to bypass everything, and plug in USB for
+to record the output to the SD card, press **B1 + B2** to bypass everything, **B2 + B3** to change the
+delay's subdivision, and plug in USB for
 **MIDI clock and CC control**.
 
 ```
@@ -114,10 +115,10 @@ The Speed engine keeps recording in the background, so switching back to it is i
 
 ## Row 1, variant 3: Interval
 
-The same Capicola pitch engine and tape reel as Speed, but the amount knob **snaps to musical
-steps**, out to two octaves, on a **harmonic ladder**: every step is the input's own fifth or octave,
-so both directions add the same two notes and the chord stays rooted on what you play. Each side of
-the deadband is split into four equal zones:
+A pitch shifter that **snaps to musical steps** and **stays in time with what you play**. The amount
+knob picks the step, on a **harmonic ladder**: every step is the input's own fifth or octave, so both
+directions add the same two notes and the chord stays rooted on what you play. Each side of the
+deadband is split into four equal zones:
 
 | Zone | CCW (down) | CW (up) | From a C |
 |---|---|---|---|
@@ -126,17 +127,22 @@ the deadband is split into four equal zones:
 | | an octave and a fourth (×3/8) | an octave and a fifth (×3) | G |
 | fully round | two octaves (×1/4) | two octaves (×4) | C |
 
-**MIX** works as on Speed: fully CW is only the shifted signal, and around noon you hear the incoming
-audio **plus** the shifted copy, so a fifth or an octave plays as a two-note chord. The intervals are
-pure (just intonation), so fifths ring cleanly against the dry note.
+**MIX** blends the shifted copy with the incoming audio: fully CW is only the shifted signal, and
+around noon you hear both, so a fifth or an octave plays as a two-note chord. The intervals are pure
+(just intonation), so fifths ring cleanly against the dry note.
 
-- Moving between steps glides quickly (about 70 ms) on the tape reel, with a hint of swoop.
+Interval has its own engine, separate from Speed. Speed is a tape: its timing drifts and catches up,
+which is the point. Interval is a delay-line shifter (two crossfading "tape heads" a few
+milliseconds behind the input, spliced where the waveforms match). It has no time grid to drift, so
+the shifted copy is **always within about 50 ms of the input**, typically 10 to 40 ms, however long
+you hold a step.
+
+- Moving between steps glides quickly (about 70 ms), with a hint of swoop.
 - The zones have a little hysteresis, so a knob or CV sitting on a border doesn't chatter. Put CV
   into J4 with some depth on the amount knob, and a stepped CV plays the intervals as a sequence.
-- The shifted copy is about 20 ms behind the dry signal (the engine's lookahead), which you can hear
-  as a slight thickening on sharp attacks.
-- Everything down to two octaves, and up to an octave, is clean. The top two up-steps (×3, ×4) have to
-  splice much more often and sound a little grainier, with a slight warble on sustained tones.
+- Single notes, octaves and fifths shift cleanly. Dense chords and full mixes pick up a slight
+  chorus-like shimmer, most at two octaves down. That is the trade for staying in time.
+- Drum hits can occasionally double (a short flam) on the up steps.
 
 ## Row 2: Drive
 
@@ -183,11 +189,21 @@ once the tail has been below -80 dB for a second.
 
 ## J3: clock in
 
-Patch a clock or gate into **J3**. The delay time follows the clock period: rising edge above about
-1.5 V, period smoothed, tempo changes over 8% jump straight to the new value. The delay glides to the
-new time like tape. With no clock, or when the clock stops for 2.5 periods, the delay falls back to
-**375 ms**. Clocks longer than 2.5 s are halved until they fit. P6's ring blinks white at 12 o'clock
-on every clock edge. The modulation variants use the same clock for their rates.
+Patch a clock into **J3** (rising edge above about 1.5 V). Athanor works out by itself whether it is
+**one pulse per beat or 24 PPQN**: pulses closer together than about 150 ms are treated as 24 PPQN.
+Other rates aren't detected; a 16th-note clock, for example, reads as a beat four times too fast.
+
+The tempo is **locked**, so the delay sits still:
+
+- The beat is measured across several pulses, and while new measurements stay within 1.5% of the
+  locked tempo it only drifts slowly toward their long-term average.
+- Two beats in a row outside that band are a real tempo change: it re-locks, and the delay glides to
+  the new time like tape.
+- When the clock stops for 2.5 beats (at least a second), the delay falls back to **375 ms**, or to
+  MIDI clock if that is running. Beats longer than 2.5 s are halved until they fit.
+
+P6's ring blinks white at 12 o'clock on every beat. The modulation variants use the same clock for
+their rates. MIDI clock gets the same tempo lock.
 
 ## Buttons
 
@@ -198,6 +214,29 @@ row's current variant colour. B3 doubles as a CPU meter and overrides its colour
 - **Amber**: average load is above 80% (close to the limit).
 
 The first 3 seconds after boot are ignored.
+
+## Delay subdivision
+
+Press **B2 and B3 together** to step the delay to its next subdivision of the beat. It wraps round,
+neither button changes its variant, and the choice is saved.
+
+| Position | Subdivision | Beats |
+|---|---|---|
+| 1 (left) | 1/2 | 2 |
+| 2 | dotted 1/4 | 1.5 |
+| 3 | 1/4 (default) | 1 |
+| 4 | dotted 1/8 | 0.75 |
+| 5 | 1/4 triplet | 0.667 |
+| 6 | 1/8 | 0.5 |
+| 7 | 1/8 triplet | 0.333 |
+| 8 (right) | 1/16 | 0.25 |
+
+- For about a second after a change, the bottom-right ring shows the eight positions as faint
+  ticks with the current one in white, longest on the left.
+- The delay **crossfades** to the new time, so the rhythm switches without a pitch swoop. Tempo
+  changes still glide like tape.
+- The beat comes from J3, MIDI clock, or the 375 ms fallback. The chorus, tremolo, phaser and
+  flanger rates are not affected.
 
 ## Bypass all
 
@@ -235,11 +274,12 @@ doesn't lurch.
 | 26 / 27 / 28 | Variant of row 1 / 2 / 3 | 0 to 42 first, 43 to 85 second, 86 to 127 third |
 | 29 | Record | 64 and up starts, below 64 stops |
 | 30 | Bypass all | 64 and up bypassed, below 64 active |
+| 31 | Delay subdivision | the range split into eight: 0 to 15 is 1/2, 16 to 31 dotted 1/4, 32 to 47 1/4, 48 to 63 dotted 1/8, 64 to 79 1/4 triplet, 80 to 95 1/8, 96 to 111 1/8 triplet, 112 to 127 1/16 |
 
 - A knob set by CC **holds that value until you turn the physical knob to it** (a dim pip shows where
   the knob is), the same pickup used after setting a CV depth. Nothing jumps when you grab a knob.
 - CV still adds on top of a value set by CC.
-- Variants chosen by CC aren't written to memory, so automation doesn't wear the flash; the variant
+- Variants and the delay subdivision chosen by CC aren't written to memory, so automation doesn't wear the flash; the variant
   you last picked on the panel is what comes back at power-on.
 
 ## Recording to SD
@@ -276,7 +316,8 @@ values from Athanor:
 |---|---|
 | CPU load | average audio load, % |
 | Audio overruns | blocks that ran out of time since boot (should stay at 0) |
-| J3 clock | detected tempo in BPM (0 = no clock) |
+| Clock tempo | locked tempo in BPM from J3 or MIDI (0 = no clock) |
+| J3 pulses per beat | 1 or 24 as detected (0 = no J3 clock) |
 | Tape speed | the reel's current speed (1 = normal) |
 | Recording / Take number / Recording dropouts | SD recorder state |
 
@@ -374,6 +415,7 @@ works for later updates without the button dance.
 | Capicola voicing (stretch, grain size, transient threshold, fade, shaper) | `src/stretch_engine.cpp` |
 | Reel inertia (speed row) | `kReelHz`, `kReelDamping`, `src/athanor.cpp` |
 | Interval steps and glide | `kDown` / `kUp`, `kStepHz`, `kStepDamping`, `src/athanor.cpp` |
+| Interval shifter (grain time, delay limits, splice search) | `src/shifter.cpp` |
 | SD recorder (buffer, chunk size, header sync) | `src/recorder.h`, `src/recorder.cpp` |
 | MIDI CC numbers | `kCcKnob0`, `kCcVariant`, `kCcRecord`, `kCcBypass`, `src/athanor.cpp` |
 | MIDI clock lock and smoothing | `src/midi_clock.h` |
@@ -384,8 +426,12 @@ works for later updates without the button dance.
 `tests/` measure specific things:
 
 - `pitch_probe`: speed tracking and reel overshoot.
-- `interval_probe`: each Interval step lands in tune, and dry + shifted both come through at the
-  mix midpoint (runs in `make test`).
+- `shift_probe`: the Interval shifter: each step in tune, the delay against the input, and how
+  cleanly a held chord comes through (runs in `make test`).
+- `div_probe`: a delay subdivision change crossfades without a click or pitch swoop (runs in
+  `make test`).
+- `clock_probe`: J3 clock: 1 / 24 PPQN detection, steadiness under polling jitter, tempo changes (runs
+  in `make test`).
 - `midi_clock_probe`: MIDI clock lock, jitter rejection, tempo changes, Start alignment and the CC
   mapping (runs in `make test`).
 - `rec_probe`: the SD recorder on the real FatFS and the SDK's RAM disk: sample-exact takes, power-cut
