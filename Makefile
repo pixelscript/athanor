@@ -90,6 +90,8 @@ test:
 	./build/host_test
 	$(HOST_CXX) -O2 -std=c++17 -Isrc tests/shift_probe.cpp src/shifter.cpp -o build/shift_probe
 	./build/shift_probe
+	$(HOST_CXX) -O2 -std=c++17 -Isrc tests/drive_probe.cpp src/drive.cpp src/fx.cpp -o build/drive_probe
+	./build/drive_probe
 	$(HOST_CXX) -O2 -std=c++17 -Isrc tests/div_probe.cpp src/fx.cpp -o build/div_probe
 	./build/div_probe
 	$(HOST_CXX) -O2 -std=c++17 -Isrc tests/clock_probe.cpp -o build/clock_probe

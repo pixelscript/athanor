@@ -155,8 +155,18 @@ B2 picks the level; the amount knob picks analog (CCW) or digital (CW).
 | 3 Fuzz (red) | Gated, sputtery fuzz with a starved bias, so decays break up | Wavefolder, heavily crushed and decimated |
 
 TONE is a tilt EQ on the driven signal: noon is flat, CCW is darker, CW is brighter. Its ring lights
-outward from noon. The analog shapers are anti-aliased; the digital ones alias deliberately. All
-levels are roughly level-matched.
+outward from noon. The analog shapers are anti-aliased; the digital ones alias deliberately.
+
+**Loudness matching.** Every level and flavour comes out about as loud as the signal going in,
+whatever the amount and tone. The drive measures the loudness of its input and of the driven signal
+continuously (weighted toward what the ear finds loud, over about 80 ms) and turns the driven
+signal down, or up by at most 3 dB, to match. Sweeping into distortion or fuzz changes the sound,
+not the volume.
+
+- The fast peaks are still squashed, so it still sounds driven, but slower dynamics follow your
+  playing: a quiet passage stays quiet instead of being pulled up to full level, so fuzz sustains
+  less than an unmatched fuzz would.
+- At low input levels the two saturation flavours have little to bite on and stay close to clean.
 
 ## Row 3, variant 1: Reverb / delay
 
@@ -440,6 +450,8 @@ works for later updates without the button dance.
 - `pitch_probe`: speed tracking and reel overshoot.
 - `shift_probe`: the Interval shifter: each step in tune, the delay against the input, and how
   cleanly a held chord comes through (runs in `make test`).
+- `drive_probe`: every drive level, flavour and amount comes out as loud as the input, still
+  distorted, with no jump when slammed on (runs in `make test`).
 - `div_probe`: a delay subdivision change crossfades without a click or pitch swoop (runs in
   `make test`).
 - `clock_probe`: J3 clock: 1 / 24 PPQN detection, steadiness under polling jitter, tempo changes (runs
