@@ -29,6 +29,13 @@
  * Hold B1 + B3 together for half a second to start / stop recording the
  * output to the SD card (REC0001.WAV, ... 24-bit stereo).
  *
+ * Press B1 + B2 together to bypass all three rows (again to bring them
+ * back); a gate on J7 does the same while it is high.
+ *
+ * USB MIDI (same cable as the web programmer): MIDI clock drives the delay
+ * time and LFO rates when nothing is patched to J3; CCs 20..30 play the six
+ * knobs, the variants, record and bypass. See README.
+ *
  * Row 1 uses Capicola's keyframe time-stretch engine
  * (c) heavylight-industries — https://github.com/heavylight-industries/capicola
  * so this firmware is distributed under the GNU AGPL v3.0 (see LICENSE).
@@ -47,6 +54,9 @@
 #include "alchemy/host_link/host.h"
 #include "alchemy/storage/fs_extension.h"
 #include "alchemy/storage/sd_card.h"
+#include "alchemy/control/tick_timebase.h"
+#include "alchemy/midi/types.h"
+#include "alchemy/midi/usb_transport.h"
 #include "alchemy/surface/control_loop.h"
 #include "alchemy/surface/page.h"
 #include "alchemy/surface/virtual_knob.h"
@@ -55,6 +65,7 @@
 #include "crashlog.h"
 #include "drive.h"
 #include "fx.h"
+#include "midi_clock.h"
 #include "modfx.h"
 #include "recorder.h"
 #include "stretch_engine.h"
@@ -155,6 +166,15 @@ static volatile float amtValue[3] = {0.5f, 0.5f, 0.5f};    // effective amount (
 static volatile float modValue[3] = {1.0f, 0.5f, 0.5f};    // effective modifier
 static volatile int8_t editing[3] = {-1, -1, -1};          // pot whose depth is being set, -1 none
 static volatile bool  catching[6] = {false, false, false, false, false, false}; // waiting for pickup
+static float          heldVal[6]  = {0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f};       // value held meanwhile
+
+/* Bypass-all: B1 + B2 (or MIDI CC 30) latches it, a gate on J7 holds it.
+ * Every amount knob is treated as if it sat in the deadband, so it behaves
+ * exactly like throwing all three knobs to the top: tails ring out, the
+ * reel spins back to normal speed. */
+static bool          bypassLatch = false;
+static bool          bypassGate  = false;
+static volatile bool bypassAll   = false;
 
 struct Gesture
 {
@@ -163,13 +183,18 @@ struct Gesture
     bool   consumed = false;  // used by a chord: no variant step on release
     float  refAmt   = 0.0f;   // knob positions at press
     float  refMod   = 0.0f;
-    float  frozen[2] = {0.5f, 0.5f};   // amount / modifier values held during the edit
 };
 static Gesture gesture[3];
 
 static inline float CvNorm(float knob, uint8_t pot)
 {
     return Clamp(knob + cvOffset[pot], 0.0f, 1.0f);
+}
+
+/** An amount knob as played: knob (or MIDI) + CV, or neutral while bypassed. */
+static inline float AmtNorm(int row)
+{
+    return bypassAll ? 0.5f : CvNorm(amtValue[row], (uint8_t)(row * 2));
 }
 
 static AmountStyle amountStyle[3];
@@ -227,7 +252,7 @@ static void DrawAmountRing(LedPanel& p, uint8_t pot, const ArcGeometry& g,
     if (editing[s.row] == (int8_t)pot) { DrawDepth(p, pot, g, cvDepth[pot]); return; }
     const uint8_t last  = (g.arc_leds > 1) ? (uint8_t)(g.arc_leds - 1) : 1u;
     const float   phys  = norm;
-    norm = CvNorm(amtValue[s.row], pot);   // the value actually playing
+    norm = AmtNorm(s.row);   // the value actually playing
     const int  ptr     = (int)(norm * (float)last + 0.5f);
     const bool neutral = (norm >= kDeadLo && norm <= kDeadHi);
 
@@ -482,11 +507,88 @@ static bool               clkHigh      = false;
 static uint32_t           clkLastUs    = 0;
 static float              clkPeriod    = 0.0f;
 
+/* ═════════════════════════════════════════════════════════════════════════
+ *  USB MIDI (shares the USB connection with HostLink)
+ * ═════════════════════════════════════════════════════════════════════════
+ * Clock: 24 ppqn timing clock becomes the beat for the delay time and the
+ * LFO divisions whenever J3 has no clock of its own.
+ *
+ * Control changes, any channel:
+ *   CC 20..25  the six knobs, top-left to bottom-right (64 = noon, so an
+ *              amount knob is bypassed around the middle of the CC range)
+ *   CC 26..28  variant of row 1 / 2 / 3 (0-42 first, 43-85 second, 86-127 third)
+ *   CC 29      record: 64+ start, below 64 stop
+ *   CC 30      bypass all: 64+ bypassed, below 64 active
+ * A knob set by CC holds that value until the physical knob is turned to it
+ * (the same pickup as after a depth edit), so nothing jumps. */
+static constexpr uint8_t kCcKnob0   = 20;
+static constexpr uint8_t kCcVariant = 26;
+static constexpr uint8_t kCcRecord  = 29;
+static constexpr uint8_t kCcBypass  = 30;
+
+static midi::DaisyUsbPort<> midiPort;
+static TickTimebase         midiTime;
+static athanor::MidiClock   midiClock;
+static bool                 midiReady = false;
+static uint32_t             midiNowMs = 0;
+static volatile uint32_t    midiSeenMs = 0;    // last MIDI message (0 = never)
+
+static void ApplyLooks();
+
+static bool OnMidiEvent(const midi::Event& e)
+{
+    using midi::EventType;
+    midiSeenMs = midiNowMs | 1u;
+    switch (e.type)
+    {
+        case EventType::TimingClock: midiClock.Tick(e.time_us); break;
+        case EventType::Start:       midiClock.Start(); break;
+        case EventType::Continue:    midiClock.Continue(); break;
+        case EventType::Stop:        midiClock.Stop(); break;
+        case EventType::ControlChange:
+        {
+            const uint8_t cc = e.data1;
+            const uint8_t v  = (uint8_t)(e.value > 127 ? 127 : e.value);
+            if (cc >= kCcKnob0 && cc < kCcKnob0 + 6)
+            {
+                const uint8_t pot = (uint8_t)(cc - kCcKnob0);
+                heldVal[pot]  = athanor::CcToKnob(v);
+                catching[pot] = true;
+            }
+            else if (cc >= kCcVariant && cc < kCcVariant + 3)
+            {
+                const int r = cc - kCcVariant;
+                uint8_t   n = (uint8_t)((v * 3u) / 128u);
+                if (n >= kNumVariants[r]) n = (uint8_t)(kNumVariants[r] - 1u);
+                if (n != variant[r]) { variant[r] = n; ApplyLooks(); }   // not saved to flash
+            }
+            else if (cc == kCcRecord)
+            {
+                if (v >= 64) { if (!recorder.Active()) recorder.Start(midiNowMs); }
+                else if (recorder.Recording()) recorder.Stop();
+            }
+            else if (cc == kCcBypass)
+                bypassLatch = (v >= 64);
+            break;
+        }
+        default: break;
+    }
+    return true;
+}
+
 static void OnPoll(uint32_t t_ms)
 {
     if (!healthy && t_ms > 5000u) { healthy = true; crash::Mark(crash::kRunning); }
 
     const float* phys = loop.Phys();
+
+    if (midiReady)
+    {
+        midiNowMs = t_ms;
+        midiTime.Update(daisy::System::GetTick());
+        midiPort.Poll(midiTime.GetSample(), OnMidiEvent);
+        midiClock.Poll(midiTime.NowUs());
+    }
 
     /* Buttons. A tap (release without turning anything) steps that row to its
      * next variant. Hold + turn either knob of the row to set that knob's CV
@@ -506,8 +608,8 @@ static void OnPoll(uint32_t t_ms)
             gs.consumed  = false;
             gs.refAmt    = ka;
             gs.refMod    = km;
-            gs.frozen[0] = amtValue[b];
-            gs.frozen[1] = modValue[b];
+            if (!catching[pa]) heldVal[pa] = amtValue[b];
+            if (!catching[pm]) heldVal[pm] = modValue[b];
         }
         if (gs.down && gs.target < 0 && !gs.consumed)
         {
@@ -515,8 +617,7 @@ static void OnPoll(uint32_t t_ms)
             else if (std::fabs(ka - gs.refAmt) > 0.02f) gs.target = (int8_t)pa;
             if (gs.target >= 0)
             {
-                editing[b]           = gs.target;
-                catching[gs.target]  = false;
+                editing[b] = gs.target;
             }
         }
         if (gs.down && gs.target >= 0)
@@ -546,10 +647,31 @@ static void OnPoll(uint32_t t_ms)
         /* Effective values: frozen while assigning / until picked up. */
         const bool holdA = (editing[b] == (int8_t)pa) || catching[pa];
         const bool holdM = (editing[b] == (int8_t)pm) || catching[pm];
-        amtValue[b] = holdA ? gs.frozen[0] : kAmtKnob[b]->Norm();
-        modValue[b] = holdM ? gs.frozen[1] : km;
-        if (catching[pa] && std::fabs(ka - gs.frozen[0]) < 0.025f) catching[pa] = false;
-        if (catching[pm] && std::fabs(km - gs.frozen[1]) < 0.025f) catching[pm] = false;
+        amtValue[b] = holdA ? heldVal[pa] : kAmtKnob[b]->Norm();
+        modValue[b] = holdM ? heldVal[pm] : km;
+        if (editing[b] != (int8_t)pa && catching[pa] && std::fabs(ka - heldVal[pa]) < 0.025f) catching[pa] = false;
+        if (editing[b] != (int8_t)pm && catching[pm] && std::fabs(km - heldVal[pm]) < 0.025f) catching[pm] = false;
+    }
+
+    /* B1 + B2 together: bypass all three rows / bring them back. Acts the
+     * moment the second button goes down. J7 gate: bypassed while high. */
+    {
+        Gesture& g1 = gesture[0];
+        Gesture& g2 = gesture[1];
+        static bool chordHeld = false;
+        const bool both = g1.down && g2.down && g1.target < 0 && g2.target < 0 && !gesture[2].down;
+        if (both)
+        {
+            g1.consumed = g2.consumed = true;
+            if (!chordHeld) { chordHeld = true; bypassLatch = !bypassLatch; }
+        }
+        else if (!g1.down && !g2.down)
+            chordHeld = false;
+
+        const float gv = hw.j7.Volts();
+        if (!bypassGate && gv > kClkHiV)      bypassGate = true;
+        else if (bypassGate && gv < kClkLoV)  bypassGate = false;
+        bypassAll = bypassLatch || bypassGate;
     }
 
     /* B1 + B3 held together for 0.5 s: start / stop SD recording. Neither
@@ -644,6 +766,7 @@ static void OnPoll(uint32_t t_ms)
 
     const uint32_t now = loop.PollTimeUs();
     const float    v   = hw.j3.Volts();
+    bool           j3Edge = false;
 
     if (!clkHigh && v > kClkHiV)
     {
@@ -658,12 +781,10 @@ static void OnPoll(uint32_t t_ms)
                     clkPeriod = p;
                 else
                     clkPeriod += 0.3f * (p - clkPeriod);
-                clockPeriodSec = clkPeriod;
             }
         }
-        clkLastUs   = now;
-        clockEdgeMs = t_ms;
-        clockEdges  = clockEdges + 1u;
+        clkLastUs = now;
+        j3Edge    = true;
     }
     else if (clkHigh && v < kClkLoV)
         clkHigh = false;
@@ -675,10 +796,24 @@ static void OnPoll(uint32_t t_ms)
         if (timeout < 1.0f) timeout = 1.0f;
         if ((float)(now - clkLastUs) * 1.0e-6f > timeout)
         {
-            clkPeriod      = 0.0f;
-            clockPeriodSec = 0.0f;
-            clkLastUs      = 0;
+            clkPeriod = 0.0f;
+            clkLastUs = 0;
         }
+    }
+
+    /* Which clock plays: J3 whenever it is running, otherwise MIDI clock
+     * (whose tempo is held after the transport stops). A J3 edge with no
+     * period yet (the very first pulse) doesn't take over. */
+    static uint32_t midiEdgesSeen = 0;
+    const uint32_t  me       = midiClock.Edges();
+    const bool      midiEdge = (me != midiEdgesSeen);
+    midiEdgesSeen = me;
+    const bool useJ3 = clkPeriod > 0.0f;
+    clockPeriodSec = useJ3 ? clkPeriod : midiClock.PeriodSec();
+    if (useJ3 ? j3Edge : midiEdge)
+    {
+        clockEdgeMs = t_ms;
+        clockEdges  = clockEdges + 1u;
     }
 }
 
@@ -731,6 +866,7 @@ static void OnRender(uint32_t /*t_ms*/)
             if (cpuAvg > 0.8f) c = Rgb{0xFF, 0x80, 0x00};
             if (overrunMs != 0 && (now - overrunMs) < 2000u) c = Rgb{0xFF, 0x00, 0x00};
         }
+        if (bypassAll) c = Rgb{0x30, 0x30, 0x30};   // all rows bypassed: buttons go dim white
         if (flashing) c = flash;
         hw.leds.SetButtonPair((uint8_t)b, hw.leds.ScaleGlobal(c));
     }
@@ -788,7 +924,7 @@ static void AudioCallback(daisy::AudioHandle::InputBuffer  in,
     crash::Mark(crash::kAudioRow1);
     /* ── Row 1: tape speed (Capicola pitch) / tape + vinyl / interval ─ */
     int   tSide; float tAmt;
-    SplitAmount(CvNorm(amtValue[0], 0), tSide, tAmt);
+    SplitAmount(AmtNorm(0), tSide, tAmt);
     const bool  reelRow = (v1 == 0) || (v1 == 2);     // variants on the pitch engine
     const int   stSide  = reelRow ? tSide : 0;
     const float mod1    = CvNorm(modValue[0], 1);
@@ -875,14 +1011,14 @@ static void AudioCallback(daisy::AudioHandle::InputBuffer  in,
     crash::Mark(crash::kAudioDrive);
     /* ── Row 2: drive ────────────────────────────────────────────────── */
     int   dSide; float dAmt;
-    SplitAmount(CvNorm(amtValue[1], 2), dSide, dAmt);
+    SplitAmount(AmtNorm(1), dSide, dAmt);
     drive.SetParams(v2, dSide, dAmt, CvNorm(modValue[1], 3));
     drive.Process(bl, br, n);
 
     crash::Mark(crash::kAudioMod);
     /* ── Row 3: space / chorus + trem / phaser + flanger ─────────────── */
     int   sSide; float sAmt;
-    SplitAmount(CvNorm(amtValue[2], 4), sSide, sAmt);
+    SplitAmount(AmtNorm(2), sSide, sAmt);
     const float mod3 = CvNorm(modValue[2], 5);
 
     {
@@ -1035,7 +1171,18 @@ int main()
     debug.Watch(gCpu);   debug.Watch(gOverruns); debug.Watch(gBpm); debug.Watch(gSpeed);
     debug.Watch(gRec);   debug.Watch(gTake);     debug.Watch(gDrops);
     host.Extend(debug);
+    /* USB MIDI on the same composite device as HostLink. If it can't start,
+     * everything else carries on without it. */
+    midiClock.Reset();
+    if (daisy::System::GetTickFreq() != 0u)
+    {
+        midiTime.Init(daisy::System::GetTickFreq(), daisy::System::GetTick());
+        /* Name the shared USB device before either service starts it. */
+        usb::Device::Shared().Configure(daisy::UsbHandle::FS_EXTERNAL, "Athanor");
+        midiReady = midiPort.Init({}, {0, 1});
+    }
     debug.Info("Athanor " ATHANOR_VERSION " (" ATHANOR_GIT_HASH "), Alchemy SDK " ALCHEMY_SDK_VERSION);
+    if (!midiReady) debug.Warn("USB MIDI did not start");
     cpu.Init(sr, kBlock);
     ticksPerBlockInv = sr / ((float)daisy::System::GetTickFreq() * (float)kBlock);
 

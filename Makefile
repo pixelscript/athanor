@@ -90,6 +90,8 @@ test:
 	$(HOST_CXX) -O2 -std=c++17 -Itests/stub -Isrc -Idsp tests/interval_probe.cpp \
 	    src/stretch_engine.cpp -o build/interval_probe
 	./build/interval_probe
+	$(HOST_CXX) -O2 -std=c++17 -Isrc tests/midi_clock_probe.cpp -o build/midi_clock_probe
+	./build/midi_clock_probe
 	@# SD recorder on the real FatFS + the SDK's RAM disk (asserts aligned DMA).
 	mkdir -p build/ffshim/util
 	echo '#include "$(abspath $(LIBDAISY_DIR))/src/sys/ffconf.h"' > build/ffshim/ffconf.h

@@ -20,7 +20,8 @@ engine by Heavylight Industries**. See [Credits](#credits).
 
 Each row has one **amount** knob on the left, one **modifier** knob on the right, a button that steps
 through that row's variants, and a CV input that can modulate either or both knobs. Hold **B1 + B3**
-to record the output to the SD card.
+to record the output to the SD card, press **B1 + B2** to bypass everything, and plug in USB for
+**MIDI clock and CC control**.
 
 ```
         LEFT (amount)   BUTTON   RIGHT (modifier)        CV in
@@ -198,6 +199,49 @@ row's current variant colour. B3 doubles as a CPU meter and overrides its colour
 
 The first 3 seconds after boot are ignored.
 
+## Bypass all
+
+Press **B1 and B2 together** to bypass all three rows at once; press them again to bring everything
+back. It acts the moment the second button goes down, and neither button changes its variant.
+
+- A **gate on J7** does the same for as long as it is high (above 1.5 V), so a sequencer can punch
+  the effects in and out.
+- While bypassed, the three buttons go dim white and each amount ring shows neutral, with a dim pip
+  where the knob really is.
+- It behaves exactly like throwing all three amount knobs into the deadband: reverb and delay tails
+  ring out, and the tape reel spins back to normal speed. Your knob positions, CV and MIDI are all
+  still there when you come back.
+
+## USB MIDI
+
+Athanor is a USB MIDI device on the same cable the web programmer uses (they work side by side). It
+listens on **all channels**.
+
+**Clock.** MIDI clock sets the delay time and the clocked LFO rates, exactly as a clock on J3 does,
+one beat per quarter note. **J3 wins** whenever it has a clock; MIDI takes over when J3 is silent.
+MIDI Start re-aligns the beat. When the transport stops, the last tempo is held, so the delay time
+doesn't lurch.
+
+**Control changes.**
+
+| CC | Controls | Values |
+|---|---|---|
+| 20 | Row 1 amount (TIME) | 64 = noon. Bypassed from 36 to 91; below is the CCW effect, above the CW effect |
+| 21 | Row 1 modifier (MIX) | 0 to 127 |
+| 22 | Row 2 amount (DRIVE) | as CC 20 |
+| 23 | Row 2 modifier (TONE) | 64 = flat |
+| 24 | Row 3 amount (SPACE) | as CC 20 |
+| 25 | Row 3 modifier (FEEDBACK / RATE) | 0 to 127 |
+| 26 / 27 / 28 | Variant of row 1 / 2 / 3 | 0 to 42 first, 43 to 85 second, 86 to 127 third |
+| 29 | Record | 64 and up starts, below 64 stops |
+| 30 | Bypass all | 64 and up bypassed, below 64 active |
+
+- A knob set by CC **holds that value until you turn the physical knob to it** (a dim pip shows where
+  the knob is), the same pickup used after setting a CV depth. Nothing jumps when you grab a knob.
+- CV still adds on top of a value set by CC.
+- Variants chosen by CC aren't written to memory, so automation doesn't wear the flash; the variant
+  you last picked on the panel is what comes back at power-on.
+
 ## Recording to SD
 
 Hold **B1 and B3 together for half a second** to start recording; do it again to stop. Neither
@@ -331,6 +375,8 @@ works for later updates without the button dance.
 | Reel inertia (speed row) | `kReelHz`, `kReelDamping`, `src/athanor.cpp` |
 | Interval steps and glide | `kDown` / `kUp`, `kStepHz`, `kStepDamping`, `src/athanor.cpp` |
 | SD recorder (buffer, chunk size, header sync) | `src/recorder.h`, `src/recorder.cpp` |
+| MIDI CC numbers | `kCcKnob0`, `kCcVariant`, `kCcRecord`, `kCcBypass`, `src/athanor.cpp` |
+| MIDI clock lock and smoothing | `src/midi_clock.h` |
 | CV jacks, depth range, dead zone | `kCvJack`, `OnPoll()`, `src/athanor.cpp` |
 | Memory layout (reverb in internal SRAM, SD DMA buffers) | `athanor.lds` (copy of the SDK script + `.d2_bss` and `.axi_bss`) |
 
@@ -340,6 +386,8 @@ works for later updates without the button dance.
 - `pitch_probe`: speed tracking and reel overshoot.
 - `interval_probe`: each Interval step lands in tune, and dry + shifted both come through at the
   mix midpoint (runs in `make test`).
+- `midi_clock_probe`: MIDI clock lock, jitter rejection, tempo changes, Start alignment and the CC
+  mapping (runs in `make test`).
 - `rec_probe`: the SD recorder on the real FatFS and the SDK's RAM disk: sample-exact takes, power-cut
   header sync, dropouts, card failure and recovery, and no unaligned DMA (runs in `make test`).
 - `wow_probe`: wow/flutter depth in cents.
