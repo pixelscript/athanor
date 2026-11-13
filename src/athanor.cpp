@@ -11,7 +11,8 @@
  *   B1  Row 1   1 Speed: tape slow-down / speed-up (pitch)  mod = mix
  *               2 Age:   tape / vinyl                      mod = wow+flutter / hiss+clicks
  *               3 Interval: snaps the tape speed to musical steps
- *                        CCW -5th / -oct / -oct-5th / -2 oct,
+ *                        harmonic ladder (only the root and its fifth):
+ *                        CCW -4th / -oct / -oct-4th / -2 oct,
  *                        CW  +5th / +oct / +oct+5th / +2 oct    mod = mix
  *   B2  Row 2   1 Saturation  analog / digital             mod = tone
  *               2 Distortion  analog / digital
@@ -41,6 +42,8 @@
 #include "sys/dma.h"
 #include "util/CpuLoadMeter.h"
 #include "alchemy/hw/alchemy_lab.h"
+#include "alchemy/version.h"
+#include "alchemy/host_link/diagnostics.h"
 #include "alchemy/host_link/host.h"
 #include "alchemy/storage/fs_extension.h"
 #include "alchemy/storage/sd_card.h"
@@ -279,7 +282,7 @@ static void DrawModRing(LedPanel& p, uint8_t pot, const ArcGeometry& g,
  * ═════════════════════════════════════════════════════════════════════════ */
 static VirtualKnob timeAmt  = VirtualKnob(kPotTopLeft, "Time")
     .Ident("time.amount")
-    .Help("Speed: CCW slows the tape to a stop, CW speeds it up to 2x (with reel inertia). Age: CCW tape, CW vinyl. Interval: CCW down a 5th / octave / octave+5th / 2 octaves, CW the same up. 10-2 o'clock: off.")
+    .Help("Speed: CCW slows the tape to a stop, CW speeds it up to 2x (with reel inertia). Age: CCW tape, CW vinyl. Interval: CCW down a 4th / octave / octave+4th / 2 octaves, CW up a 5th / octave / octave+5th / 2 octaves (always the root's fifth or octave). 10-2 o'clock: off.")
     .Ring(Custom(DrawAmountRing, &amountStyle[0]));
 static VirtualKnob timeMix  = VirtualKnob(kPotTopRight, "Mix")
     .Ident("time.mix")
@@ -317,6 +320,19 @@ static hostlink::Host host("athanor", "Athanor", ATHANOR_VERSION, ATHANOR_GIT_HA
 static alchemy::SdCard               sdCard;
 static hostlink::FsExtension         fsExt(sdCard);
 static athanor::Recorder             recorder;
+
+/* Live values and a log in the web programmer's Device console (same USB
+ * connection; nothing waits on a client). */
+static hostlink::Diagnostics     debug;
+static hostlink::Gauge<float>    gCpu("cpu.load", "CPU load");
+static hostlink::Gauge<uint32_t> gOverruns("cpu.overruns", "Audio overruns");
+static hostlink::Gauge<float>    gBpm("clock.bpm", "J3 clock");
+static hostlink::Gauge<float>    gSpeed("tape.speed", "Tape speed");
+static hostlink::Gauge<bool>     gRec("rec.active", "Recording");
+static hostlink::Gauge<uint32_t> gTake("rec.take", "Take number");
+static hostlink::Gauge<uint32_t> gDrops("rec.dropouts", "Recording dropouts");
+static volatile uint32_t         overrunCount = 0;
+static volatile float            reelShown    = 1.0f;
 
 /* Recording feedback on the three button LEDs (see OnRender). */
 enum class Flash : uint8_t { None, Started, Problem, Stopped, Dropout };
@@ -563,14 +579,42 @@ static void OnPoll(uint32_t t_ms)
     }
     recorder.Poll(t_ms);
     Flash fl = Flash::None;
+    static uint32_t recDrops = 0;
+    const unsigned  take = (unsigned)recorder.TakeNumber();
     switch (recorder.TakeEvent())
     {
-        case athanor::Recorder::Event::Started:   fl = Flash::Started; break;
-        case athanor::Recorder::Event::Stopped:   fl = Flash::Stopped; break;
+        case athanor::Recorder::Event::Started:
+            fl = Flash::Started; recDrops = 0;
+            debug.Info("Recording REC%04u.WAV", take);
+            break;
+        case athanor::Recorder::Event::Stopped:
+            fl = Flash::Stopped;
+            debug.Info("Saved REC%04u.WAV (%u dropouts)", take, (unsigned)recDrops);
+            break;
         case athanor::Recorder::Event::Failed:
-        case athanor::Recorder::Event::CardError: fl = Flash::Problem; break;
-        case athanor::Recorder::Event::Dropout:   fl = Flash::Dropout; break;
+            fl = Flash::Problem;
+            debug.Warn("Recording could not start: no card, not FAT32, or card full");
+            break;
+        case athanor::Recorder::Event::CardError:
+            fl = Flash::Problem;
+            debug.Error("SD card error: REC%04u.WAV closed early", take);
+            break;
+        case athanor::Recorder::Event::Dropout:
+            fl = Flash::Dropout; recDrops++;
+            debug.Warn("SD card fell behind: audio lost in REC%04u.WAV", take);
+            break;
         default: break;
+    }
+    /* Gauges, ~10 Hz. */
+    if ((t_ms % 100u) == 0u)
+    {
+        gCpu.Set(cpuAvg * 100.0f);
+        gOverruns.Set(overrunCount);
+        gBpm.Set(clockPeriodSec > 0.0f ? 60.0f / clockPeriodSec : 0.0f);
+        gSpeed.Set(reelShown);
+        gRec.Set(recorder.Recording());
+        gTake.Set(recorder.TakeNumber());
+        gDrops.Set(recDrops);
     }
     if (fl != Flash::None)
     {
@@ -757,14 +801,16 @@ static void AudioCallback(daisy::AudioHandle::InputBuffer  in,
      * to neutral lets the reel spin back to 1x audibly before the row hands
      * back to the dry signal.
      *   Speed:    continuous. CCW 1x -> stopped, CW 1x -> 2x.
-     *   Interval: four steps per side, out to two octaves: a fifth, an
-     *             octave, an octave and a fifth, two octaves. The modifier
+     *   Interval: four steps per side, out to two octaves, on a harmonic
+     *             ladder: every step is the input's own fifth or octave, so
+     *             both directions add the same two notes (from a C: G and C).
+     *             Up: x3/2, x2, x3, x4. Down: x3/4, x1/2, x3/8, x1/4. The modifier
      *             stays MIX, so the dry input plus the shifted copy plays
      *             as a two-note chord. */
     float pitchTarget = 1.0f;
     if (v1 == 2)
     {
-        static constexpr float kDown[4] = {2.0f / 3.0f, 0.5f, 1.0f / 3.0f, 0.25f};
+        static constexpr float kDown[4] = {0.75f, 0.5f, 0.375f, 0.25f};
         static constexpr float kUp[4]   = {1.5f, 2.0f, 3.0f, 4.0f};
         if (stSide != 0)
         {
@@ -799,6 +845,7 @@ static void AudioCallback(daisy::AudioHandle::InputBuffer  in,
         if (reelPitch > kMaxPitch) { reelPitch = kMaxPitch; if (reelVel > 0.0f) reelVel = 0.0f; }
     }
     stretch.SetPitch(reelPitch);
+    reelShown = reelPitch;
 
     const bool spinning = std::fabs(reelPitch - 1.0f) > 0.004f || std::fabs(reelVel) > 0.02f;
     const bool active   = reelRow && (stSide != 0 || spinning);
@@ -884,7 +931,7 @@ static void AudioCallback(daisy::AudioHandle::InputBuffer  in,
     cpuAvg = cpu.GetAvgCpuLoad();
     const float    load = (float)(daisy::System::GetTick() - blockStart) * ticksPerBlockInv;
     const uint32_t ms   = daisy::System::GetNow();
-    if (load > 0.98f && ms > 3000u) overrunMs = ms ? ms : 1u;
+    if (load > 0.98f && ms > 3000u) { overrunMs = ms ? ms : 1u; overrunCount = overrunCount + 1u; }
 }
 
 /* ═════════════════════════════════════════════════════════════════════════
@@ -982,6 +1029,13 @@ int main()
     sdCard.Init();                      // owns volume "0:" (lazy, no disk I/O)
     recorder.Init(&sdCard, (uint32_t)(sr + 0.5f));
     host.Extend(fsExt);
+    gCpu.Unit("%");
+    gBpm.Unit("BPM");
+    gSpeed.Unit("x");
+    debug.Watch(gCpu);   debug.Watch(gOverruns); debug.Watch(gBpm); debug.Watch(gSpeed);
+    debug.Watch(gRec);   debug.Watch(gTake);     debug.Watch(gDrops);
+    host.Extend(debug);
+    debug.Info("Athanor " ATHANOR_VERSION " (" ATHANOR_GIT_HASH "), Alchemy SDK " ALCHEMY_SDK_VERSION);
     cpu.Init(sr, kBlock);
     ticksPerBlockInv = sr / ((float)daisy::System::GetTickFreq() * (float)kBlock);
 

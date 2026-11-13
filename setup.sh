@@ -10,7 +10,7 @@ else
   mkdir -p lib
   if [ ! -d lib/alchemy-sdk/.git ]; then
     git clone https://github.com/hermetic-modular/alchemy-sdk.git lib/alchemy-sdk
-    git -C lib/alchemy-sdk checkout 3f40b663297708c987c28bf36065c4d1047de375   # v0.12.0
+    git -C lib/alchemy-sdk checkout c8b8925   # v0.13.0
   fi
   if [ ! -d lib/libDaisy/.git ]; then
     git clone https://github.com/electro-smith/libDaisy.git lib/libDaisy

@@ -9,7 +9,7 @@ using namespace athanor;
 static const float SR = 48000;
 int main()
 {
-    const float ratios[] = {1.0f, 2.0f/3, 0.5f, 1.0f/3, 0.25f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 1.0f};
+    const float ratios[] = {1.0f, 0.75f, 0.5f, 0.375f, 0.25f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 1.0f};
     const int   N = sizeof(ratios) / sizeof(ratios[0]);
     int fails = 0;
     for (int pass = 0; pass < 1; pass++)
@@ -55,7 +55,7 @@ int main()
     }
     /* Chord: mix at noon = dry + shifted copy, both notes at equal level. */
     printf("chord (mix 50%%: dry 220 Hz + shifted)\n");
-    for (float ratio : {2.0f / 3, 0.5f, 1.0f / 3, 0.25f, 1.5f, 2.0f, 3.0f, 4.0f})
+    for (float ratio : {0.75f, 0.5f, 0.375f, 0.25f, 1.5f, 2.0f, 3.0f, 4.0f})
     {
         StretchEngine e; e.Init(SR); e.SetPitch(ratio);
         const int B = 64; float il[B], ir[B], ol[B], orr[B]; long n = 0;

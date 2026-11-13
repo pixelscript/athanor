@@ -223,6 +223,21 @@ The buttons tell you briefly what happened, all three at once:
 The recorder buffers about 7 seconds in SDRAM, so ordinary cards keep up easily; amber flashes mean
 a slow or worn card. Takes stop automatically at the FAT32 4 GB limit (about 4 hours).
 
+## Live values and log (web programmer)
+
+With the module connected over USB, the web programmer's **Device console** shows a log and live
+values from Athanor:
+
+| Value | Meaning |
+|---|---|
+| CPU load | average audio load, % |
+| Audio overruns | blocks that ran out of time since boot (should stay at 0) |
+| J3 clock | detected tempo in BPM (0 = no clock) |
+| Tape speed | the reel's current speed (1 = normal) |
+| Recording / Take number / Recording dropouts | SD recorder state |
+
+The log records each take as it starts and is saved, and says why a recording failed.
+
 ## Safe mode (crash report)
 
 If the firmware ever crashes, it records where and resets itself. The bootloader then runs again,
@@ -265,7 +280,7 @@ make              # -> build/athanor.bin
 make test         # host-side DSP tests, no hardware needed
 ```
 
-The Alchemy SDK (v0.12.0) and libDaisy are git submodules pinned to the commits this firmware is
+The Alchemy SDK (v0.13.0) and libDaisy are git submodules pinned to the commits this firmware is
 tested against. The build stamps `version.txt` and the git hash into the HostLink identity, so the
 web programmer shows exactly what's running.
 
