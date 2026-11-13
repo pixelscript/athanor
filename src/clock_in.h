@@ -157,4 +157,86 @@ class PulseClock
     bool     have_last_ = false;
 };
 
+/**
+ * Rising edges of a gate, caught on the audio thread and handed to the
+ * control loop. The control loop can be held up for several milliseconds (an
+ * SD card write, a flash save), long enough to miss a clock pulse outright;
+ * the audio callback never is, so it does the watching and timestamps each
+ * edge. Single producer (audio), single consumer (control loop), no locks.
+ */
+class EdgeCapture
+{
+  public:
+    static constexpr uint32_t kSize = 32;   // power of two
+
+    void SetThresholds(float hi_v, float lo_v) { hi_ = hi_v; lo_ = lo_v; }
+
+    /** Audio thread: the jack's voltage now, and a timestamp for it (any
+     *  unit the consumer understands, e.g. a raw hardware tick). */
+    void Sample(float volts, uint32_t stamp)
+    {
+        const uint32_t t_us = stamp;
+        if (!high_ && volts > hi_)
+        {
+            high_ = true;
+            const uint32_t w = w_;
+            if ((uint32_t)(w - r_) < kSize)          // full: drop (never blocks)
+            {
+                q_[w & (kSize - 1u)] = t_us;
+                w_ = w + 1u;
+            }
+        }
+        else if (high_ && volts < lo_)
+            high_ = false;
+    }
+
+    /** Control loop: next captured edge, oldest first. */
+    bool Pop(uint32_t& t_us)
+    {
+        const uint32_t r = r_;
+        if (r == w_) return false;
+        t_us = q_[r & (kSize - 1u)];
+        r_   = r + 1u;
+        return true;
+    }
+
+  private:
+    volatile uint32_t q_[kSize] = {};
+    volatile uint32_t w_ = 0, r_ = 0;
+    float hi_ = 1.5f, lo_ = 0.6f;
+    bool  high_ = false;
+};
+
+/**
+ * Two watchers see the same jack: the control loop (every millisecond, but
+ * blind while it is held up) and the audio thread (never held up, but only
+ * every 1.3 ms, so it can miss a very short trigger). Each catches pulses the
+ * other misses; this merges their edges into one stream. Two edges closer
+ * than 3 ms are the same pulse seen twice (the fastest real clock, 24 ppqn at
+ * 300 BPM, is 8 ms apart).
+ */
+class EdgeMerge
+{
+  public:
+    void Reset() { have_ = false; }
+    /** True if this edge is a new pulse; false if it repeats the last one. */
+    bool Accept(uint32_t t_us)
+    {
+        if (have_)
+        {
+            const int32_t d = (int32_t)(t_us - last_us_);
+            if (d < kSameUs && d > -kSameUs) return false;
+            if (d < 0) return false;                 // older than one already counted
+        }
+        last_us_ = t_us;
+        have_    = true;
+        return true;
+    }
+
+  private:
+    static constexpr int32_t kSameUs = 3000;
+    uint32_t last_us_ = 0;
+    bool     have_ = false;
+};
+
 } // namespace athanor

@@ -64,6 +64,36 @@ int main()
         printf("echo after switching 0.5 s -> 0.25 s: %.1f ms\n", ms);
         CHECK(fabs(ms - 250) < 3, "echo at %.1f ms, expected 250", ms);
     }
+    /* Changes arriving faster than the crossfade (a CC sweep): each one must
+     * still be smooth, and the delay must end on the last one asked for. */
+    {
+        Space s; s.Init(SR, plate, dl, dr);
+        s.SetParams(+1, 1.0f, 0.0f); s.SetDelaySeconds(0.5f);
+        const int B = 64; float l[B], r[B]; long n = 0; double worst = 0; float prev = 0;
+        const float times[6] = {0.375f, 0.25f, 0.333f, 0.125f, 0.75f, 0.1875f};
+        float cur = 0.5f; long peak_at = 0; float peak = 0;
+        const long sweep = (long)(SR * 1.5), hit = (long)(SR * 2.5);
+        for (long b = 0; b < (long)(SR * 3.5) / B; b++)
+        {
+            const long t0 = b * B;
+            bool jump = false;
+            for (int k = 0; k < 6; k++) if (t0 >= sweep + k * 480 && t0 < sweep + k * 480 + B) { cur = times[k]; jump = true; }   // every 10 ms
+            s.SetDelaySeconds(cur, jump);
+            for (int i = 0; i < B; i++) { l[i] = r[i] = (n < hit - 4800 ? 0.3f * sinf(2 * M_PI * 330 * n / SR) : 0.0f) + (n == hit ? 1.0f : 0.0f); n++; }
+            s.Process(l, r, B);
+            for (int i = 0; i < B; i++)
+            {
+                const long t = t0 + i;
+                if (t > sweep - 480 && t < sweep + 24000) worst = std::fmax(worst, std::fabs(l[i] - prev));
+                prev = l[i];
+                if (t > hit + 2400 && std::fabs(l[i]) > peak) { peak = std::fabs(l[i]); peak_at = t; }
+            }
+        }
+        const double ms = (peak_at - hit) / SR * 1000;
+        printf("six changes 10 ms apart: biggest step %.3f, then echoes at %.1f ms (last asked: 187.5)\n", worst, ms);
+        CHECK(worst < 0.08, "click during rapid subdivision changes (step %.3f)", worst);
+        CHECK(std::fabs(ms - 187.5) < 3, "ended at %.1f ms, expected 187.5", ms);
+    }
     printf(fails ? "%d FAIL\n" : "subdivision change OK\n", fails);
     return fails ? 1 : 0;
 }

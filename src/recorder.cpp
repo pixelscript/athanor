@@ -27,8 +27,11 @@ constexpr uint32_t kRingMask     = Recorder::kRingBytes - 1u;
 constexpr uint32_t kBytesPerFrame = 6u;          // 24-bit stereo
 constexpr uint32_t kSyncMs       = 4000u;        // header rewrite + f_sync
 constexpr uint32_t kMinFreeKib   = 16u * 1024u;  // refuse to start below 16 MB
-/* FAT32 files stop at 4 GiB - 1: close the take a little before that. */
-constexpr uint32_t kMaxDataBytes = 0xFFFFFFFFu - Recorder::kHeaderBytes - 2u * Recorder::kChunkBytes;
+/* FAT32 files stop at 4 GiB - 1. Stop early enough that everything still
+ * queued in the ring when the limit trips (up to the whole ring) fits too,
+ * so the take always closes cleanly. */
+constexpr uint32_t kMaxDataBytes = 0xFFFFFFFFu - Recorder::kHeaderBytes - Recorder::kRingBytes
+                                   - 2u * Recorder::kChunkBytes;
 
 inline void Put16(uint8_t* p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
 inline void Put32(uint8_t* p, uint32_t v)

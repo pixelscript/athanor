@@ -870,7 +870,7 @@ svg.addEventListener('wheel', e => {
 /* keyboard */
 const keysHeld = new Set();
 document.addEventListener('keydown', e => {
-  if (e.target.tagName === 'SELECT') return;
+  if (e.target.tagName === 'SELECT' || e.target.tagName === 'BUTTON') return;   // let focused controls take their own keys
   const k = e.key;
   if (['1', '2', '3'].includes(k)) { if (!keysHeld.has(k)) { keysHeld.add(k); clearTimeline(); pressButton(+k - 1); touchRow(+k - 1); } return; }
   if (k === 'ArrowRight' || k === ' ' || k === 'PageDown') { e.preventDefault(); goStep(stepIdx + 1); }

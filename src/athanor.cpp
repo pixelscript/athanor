@@ -164,7 +164,13 @@ static constexpr DelayDiv kDelayDivs[] = {
 static constexpr uint8_t kNumDelayDivs   = sizeof(kDelayDivs) / sizeof(kDelayDivs[0]);
 static constexpr uint8_t kDefaultDelayDiv = 2;      // one beat
 static volatile uint8_t  delayDiv        = kDefaultDelayDiv;
-static volatile uint32_t delayDivShownMs = 0;       // ring shows the choice briefly (0 = not showing)
+/* MIDI can change the live variants and subdivision; only what was chosen
+ * on the panel is written to flash and comes back at power-on. */
+static uint8_t           panelVariant[3] = {0, 0, 0};
+static uint8_t           panelDelayDiv   = kDefaultDelayDiv;
+static volatile bool     delayDivShow    = false;   // ring shows the choice briefly...
+static volatile uint32_t delayDivShownMs = 0;       // ...from this moment (a real timestamp, never a flag)
+static constexpr int32_t kDelayDivShowMs = 1200;
 
 /* ═════════════════════════════════════════════════════════════════════════
  *  Rings
@@ -309,7 +315,7 @@ static void DrawModRing(LedPanel& p, uint8_t pot, const ArcGeometry& g,
 
     /* Just after the delay subdivision changes, the bottom-right ring shows
      * which of the eight it is: one white LED, longest at the left. */
-    if (s.row == 2 && delayDivShownMs != 0 && (t_ms - delayDivShownMs) < 1200u)
+    if (s.row == 2 && delayDivShow && (int32_t)(t_ms - delayDivShownMs) < kDelayDivShowMs)
     {
         const int at = (int)((float)delayDiv * (float)last / (float)(kNumDelayDivs - 1) + 0.5f);
         for (uint8_t i = 0; i < g.arc_leds; i++)
@@ -530,13 +536,13 @@ static void SaveVariants()
 {
     SavedState s{};
     s.magic   = kSaveMagic;
-    for (int r = 0; r < 3; r++) s.v[r] = variant[r];
+    for (int r = 0; r < 3; r++) s.v[r] = panelVariant[r];
     s.version = 4;
     s.check   = SaveCheck(s);
     for (int r = 0; r < 3; r++) s.depth[r] = DepthToSave(cvDepth[kAmtPot[r]]);
     s.check2  = SaveCheck2(s);
     for (int r = 0; r < 3; r++) s.depthR[r] = DepthToSave(cvDepth[kModPot[r]]);
-    s.delayDiv = delayDiv;
+    s.delayDiv = panelDelayDiv;
     s.check3  = SaveCheck3(s);
     hw.seed.qspi.Erase(kSaveAddr, kSaveAddr + 4096u);
     hw.seed.qspi.Write(kSaveAddr, sizeof(s), reinterpret_cast<uint8_t*>(&s));
@@ -552,7 +558,25 @@ static volatile bool healthy = false;   // survived the first 5 s
 static constexpr float    kClkHiV      = 1.5f;
 static constexpr float    kClkLoV      = 0.6f;
 static constexpr float    kFallbackSec = 0.375f;
-static bool               clkHigh      = false;
+/* J3 has two watchers, merged into one stream of edges (see EdgeMerge):
+ *  - the control loop, every millisecond: fast enough for 1 ms triggers, but
+ *    blind while an SD-card or flash write holds it up;
+ *  - the audio callback, every 1.3 ms: never held up, so it covers those
+ *    gaps. It reads the ADC directly (the SDK's calibrated reading is only
+ *    refreshed by the control loop) and stamps edges with the raw hardware
+ *    tick, which the control loop converts to its own microsecond clock. */
+static athanor::EdgeCapture j3Capture;
+static athanor::EdgeMerge   j3Merge;
+static bool                 j3LoopHigh = false;
+static uint16_t*            j3Adc    = nullptr;
+static volatile float       j3Trim   = 0.0f;    // calibrated minus nominal volts, learned
+
+static inline float J3NominalVolts()
+{
+    /* Same convention as the SDK's CvInput: flipped ADC, design scale. */
+    const float value = 1.0f - (float)(*j3Adc) * (1.0f / 65535.0f);
+    return (value - 0.5f) * (kV2VddaDesign / kV2CvInGainDesign);
+}
 /* J3: 1 or 24 pulses per beat (detected), measured across several pulses and
  * then tempo-locked, so polling jitter never reaches the delay time. */
 static athanor::PulseClock j3Clock;
@@ -585,14 +609,12 @@ static TickTimebase         midiTime;
 static athanor::MidiClock   midiClock;
 static bool                 midiReady = false;
 static uint32_t             midiNowMs = 0;
-static volatile uint32_t    midiSeenMs = 0;    // last MIDI message (0 = never)
 
 static void ApplyLooks();
 
 static bool OnMidiEvent(const midi::Event& e)
 {
     using midi::EventType;
-    midiSeenMs = midiNowMs | 1u;
     switch (e.type)
     {
         case EventType::TimingClock: midiClock.Tick(e.time_us); break;
@@ -626,7 +648,7 @@ static bool OnMidiEvent(const midi::Event& e)
             else if (cc == kCcDelayDiv)
             {
                 const uint8_t n = (uint8_t)((v * kNumDelayDivs) / 128u);
-                if (n != delayDiv) { delayDiv = n; delayDivShownMs = midiNowMs | 1u; }   // not saved to flash
+                if (n != delayDiv) { delayDiv = n; delayDivShownMs = midiNowMs; delayDivShow = true; }   // not saved to flash
             }
             break;
         }
@@ -641,10 +663,11 @@ static void OnPoll(uint32_t t_ms)
 
     const float* phys = loop.Phys();
 
+    /* The control loop's microsecond clock (MIDI and J3 edges share it). */
+    if (midiTime.Initialized()) midiTime.Update(daisy::System::GetTick());
     if (midiReady)
     {
         midiNowMs = t_ms;
-        midiTime.Update(daisy::System::GetTick());
         midiPort.Poll(midiTime.GetSample(), OnMidiEvent);
         midiClock.Poll(midiTime.NowUs());
     }
@@ -698,6 +721,7 @@ static void OnPoll(uint32_t t_ms)
             else if (!gs.consumed)
             {
                 variant[b] = (uint8_t)((variant[b] + 1u) % kNumVariants[b]);
+                panelVariant[b] = variant[b];    // a panel choice: this is what gets saved
                 ApplyLooks();
                 dirtyMs = t_ms ? t_ms : 1u;
             }
@@ -751,14 +775,16 @@ static void OnPoll(uint32_t t_ms)
             {
                 chordHeld       = true;
                 delayDiv        = (uint8_t)((delayDiv + 1u) % kNumDelayDivs);
-                delayDivShownMs = t_ms | 1u;
+                panelDelayDiv   = delayDiv;      // a panel choice: this is what gets saved
+                delayDivShownMs = t_ms;
+                delayDivShow    = true;
                 dirtyMs         = t_ms ? t_ms : 1u;
                 debug.Info("Delay: %s", kDelayDivs[delayDiv].name);
             }
         }
         else
             chordHeld = false;   // either button up: the next press together fires again
-        if (delayDivShownMs != 0 && (t_ms - delayDivShownMs) >= 1200u) delayDivShownMs = 0;
+        if (delayDivShow && (int32_t)(t_ms - delayDivShownMs) >= kDelayDivShowMs) delayDivShow = false;
     }
 
     /* B1 + B3 held together for 0.5 s: start / stop SD recording. Neither
@@ -828,7 +854,7 @@ static void OnPoll(uint32_t t_ms)
     }
     if (fl != Flash::None)
     {
-        flashMs   = daisy::System::GetNow() | 1u;
+        flashMs   = daisy::System::GetNow();   // a real timestamp; flashKind is the flag
         flashKind = fl;
     }
 
@@ -852,25 +878,44 @@ static void OnPoll(uint32_t t_ms)
         SaveVariants();
     }
 
-    const uint32_t now = loop.PollTimeUs();
-    const float    v   = hw.j3.Volts();
-    bool           j3Edge = false;
-
-    if (!clkHigh && v > kClkHiV)
+    /* Keep the audio thread's J3 reading in step with the calibrated one
+     * (slowly, and only while the two agree, i.e. not mid-edge). */
     {
-        clkHigh = true;
-        j3Edge  = j3Clock.Edge(now);                 // true on beats only
-        /* Lock on the first measurement, then refine once per beat. */
-        if (j3Clock.RawPeriod() > 0.0f && (j3Edge || j3Lock.Period() <= 0.0f))
-            j3Lock.Update(j3Clock.RawPeriod());
+        const float diff = hw.j3.Volts() - J3NominalVolts();
+        if (diff > -1.0f && diff < 1.0f) j3Trim = j3Trim + 0.02f * (diff - j3Trim);
     }
-    else if (clkHigh && v < kClkLoV)
-        clkHigh = false;
 
-    if (j3Clock.Lost(now))
+    /* Clock edges: first those the audio thread caught (converted from raw
+     * ticks to this loop's clock), then this poll's own reading. The merge
+     * drops whichever watcher reports a pulse second. */
+    bool j3Edge = false;
+    auto on_edge = [&](uint32_t us) {
+        if (!j3Merge.Accept(us)) return;
+        const bool beat = j3Clock.Edge(us);              // true on beats only
+        if (beat) j3Edge = true;
+        /* Lock on the first measurement, then refine once per beat. */
+        if (j3Clock.RawPeriod() > 0.0f && (beat || j3Lock.Period() <= 0.0f))
+            j3Lock.Update(j3Clock.RawPeriod());
+    };
+    const TickTimebase::Sample nowSample = midiTime.GetSample();
+    const uint32_t             nowUs     = midiTime.NowUs();
+    uint32_t                   tick;
+    while (j3Capture.Pop(tick))
+    {
+        uint32_t us;
+        if (nowSample.TimeOf(tick, us)) on_edge(us);
+    }
+    {
+        const float v = hw.j3.Volts();
+        if (!j3LoopHigh && v > kClkHiV)      { j3LoopHigh = true; on_edge(nowUs); }
+        else if (j3LoopHigh && v < kClkLoV)  j3LoopHigh = false;
+    }
+
+    if (j3Clock.Lost(nowUs))
     {
         j3Clock.Reset();
         j3Lock.Reset();
+        j3Merge.Reset();
     }
 
     /* MIDI clock gets the same tempo lock. Its tempo is held after the
@@ -907,7 +952,9 @@ static bool FlashColour(uint32_t now, Rgb& c)
     const Flash k = flashKind;
     if (k != Flash::None)
     {
-        const uint32_t t = now - flashMs;
+        /* Signed: a redraw in the same millisecond (or a hair before) is t = 0. */
+        const int32_t  dt = (int32_t)(now - flashMs);
+        const uint32_t t  = dt < 0 ? 0u : (uint32_t)dt;
         bool on = false; uint32_t len = 0; Rgb col{0xFF, 0x00, 0x00};
         switch (k)
         {
@@ -917,7 +964,7 @@ static bool FlashColour(uint32_t now, Rgb& c)
             case Flash::Dropout: on = t < 400u; len = 600u; col = Rgb{0xFF, 0x80, 0x00}; break;
             default: break;
         }
-        if (t >= len) { flashKind = Flash::None; flashMs = 0; }
+        if (t >= len) flashKind = Flash::None;
         else { c = on ? col : Rgb{0, 0, 0}; return true; }
     }
     if (recorder.Recording() && ((now / 100u) % 30u) == 0u)
@@ -990,6 +1037,10 @@ static void AudioCallback(daisy::AudioHandle::InputBuffer  in,
     blockStart = daisy::System::GetTick();
     if (n > kBlock) n = kBlock;
 
+    /* J3 clock: sample the jack; a rising edge is stamped with the raw tick
+     * (blockStart) for the control loop to place on its own clock. */
+    if (j3Adc) j3Capture.Sample(J3NominalVolts() + j3Trim, blockStart);
+
     const float    sr      = hw.SampleRate();
     const float    clk     = clockPeriodSec;
     const float    beatSec = (clk > 0.0f) ? clk : kFallbackSec;
@@ -1061,9 +1112,6 @@ static void AudioCallback(daisy::AudioHandle::InputBuffer  in,
      * shifted copy stays within ~50 ms of the input however long it's held,
      * so dry + shifted land together as a chord. */
     const bool interval = (v1 == 2);
-    static bool wasInterval = false;
-    if (interval && !wasInterval) shifter.Reset();   // fresh history on entering the variant
-    wasInterval = interval;
     stretch.SetPitch(interval ? 1.0f : reelPitch);
     shifter.SetRatio(reelPitch);
     reelShown = reelPitch;
@@ -1074,7 +1122,7 @@ static void AudioCallback(daisy::AudioHandle::InputBuffer  in,
     timeActive = active;
 
     /* Near a full stop the tape runs out of level, like a real tape stop. */
-    const float stopGain = interval ? 1.0f : Clamp(reelPitch / 0.12f, 0.0f, 1.0f);
+    const float stopGain = Clamp(reelPitch / 0.12f, 0.0f, 1.0f);   // (always 1 at Interval's speeds)
     const float engage   = engageSm.Tick(active ? 1.0f : 0.0f);
     const float mixT     = (v1 == 0 || v1 == 2) ? mod1 : mixSm.v;   // Speed / Interval: mix
     const float wet      = engage * mixSm.Tick(mixT);
@@ -1083,11 +1131,30 @@ static void AudioCallback(daisy::AudioHandle::InputBuffer  in,
     float*       bl = out[0];
     float*       br = out[1];
     stretch.Process(in[0], in[1], wl, wr, n);   // always runs: keeps its history live
-    if (interval) shifter.Process(in[0], in[1], wl, wr, n);
+
+    /* Both engines always have live history (the shifter is fed even when it
+     * isn't heard), and switching between Speed and Interval crossfades
+     * their outputs over ~20 ms, so changing variant mid-effect neither
+     * drops out nor clicks. */
+    static float sl[kBlock], sr2[kBlock];
+    static float ivMix = 0.0f;                          // 0 = Capicola, 1 = shifter
+    const float  ivFrom = ivMix;
+    ivMix = Clamp(ivMix + (interval ? 1.0f : -1.0f) * (1.0f / 15.0f), 0.0f, 1.0f);
+    const bool   shifting = (ivFrom > 0.0f) || (ivMix > 0.0f);
+    if (shifting) shifter.Process(in[0], in[1], sl, sr2, n);
+    else          shifter.Feed(in[0], in[1], n);
+    const float ivStep = (ivMix - ivFrom) / (float)n;
     for (size_t i = 0; i < n; i++)
     {
-        bl[i] = in[0][i] + wet * (stopGain * wl[i] - in[0][i]);
-        br[i] = in[1][i] + wet * (stopGain * wr[i] - in[1][i]);
+        float yl = stopGain * wl[i], yr = stopGain * wr[i];
+        if (shifting)
+        {
+            const float g = ivFrom + ivStep * (float)(i + 1);
+            yl += g * (sl[i] - yl);
+            yr += g * (sr2[i] - yr);
+        }
+        bl[i] = in[0][i] + wet * (yl - in[0][i]);
+        br[i] = in[1][i] + wet * (yr - in[1][i]);
     }
 
     crash::Mark(crash::kAudioAge);
@@ -1230,6 +1297,8 @@ int main()
     crash::Mark(crash::kHwInit);
 
     LoadVariants();
+    for (int r = 0; r < 3; r++) panelVariant[r] = variant[r];
+    panelDelayDiv = delayDiv;
     crash::Mark(crash::kLoadVariants);
     modStyle[0] = {{0, 0, 0}, false, false, 0};
     modStyle[1] = {{0, 0, 0}, true, false, 1};    // tone: bipolar from noon
@@ -1268,9 +1337,11 @@ int main()
      * everything else carries on without it. */
     midiClock.Reset();
     j3Clock.Reset();
+    j3Capture.SetThresholds(kClkHiV, kClkLoV);
+    j3Adc = hw.seed.adc.GetPtr(kCvAdcOffset + 0u);   // J3 is the first CV input
     if (daisy::System::GetTickFreq() != 0u)
     {
-        midiTime.Init(daisy::System::GetTickFreq(), daisy::System::GetTick());
+        midiTime.Init(daisy::System::GetTickFreq(), daisy::System::GetTick());   // also J3's clock
         /* Name the shared USB device before either service starts it. */
         usb::Device::Shared().Configure(daisy::UsbHandle::FS_EXTERNAL, "Athanor");
         midiReady = midiPort.Init({}, {0, 1});

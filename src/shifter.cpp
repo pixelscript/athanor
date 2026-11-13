@@ -133,6 +133,21 @@ void Shifter::StartSplice()
     fading_   = true;
 }
 
+namespace { constexpr float kMonoLp = 0.25f; }   // ~2 kHz: steadier waveform matching
+
+void Shifter::Feed(const float* in_l, const float* in_r, std::size_t n)
+{
+    float lp = m_[(w_ - 1u) & kMask];
+    for (std::size_t i = 0; i < n; i++)
+    {
+        l_[w_] = in_l[i];
+        r_[w_] = in_r[i];
+        lp += kMonoLp * (0.5f * (in_l[i] + in_r[i]) - lp);
+        m_[w_] = lp;
+        w_ = (w_ + 1u) & kMask;
+    }
+}
+
 void Shifter::Process(const float* in_l, const float* in_r,
                       float* out_l, float* out_r, std::size_t n)
 {
@@ -146,7 +161,6 @@ void Shifter::Process(const float* in_l, const float* in_r,
     if (fade_len < 32.0f) fade_len = 32.0f;
     const float travel = fade_len * mag;                // delay covered during one crossfade
 
-    static constexpr float kMonoLp = 0.25f;             // ~2 kHz: steadier waveform matching
     float lp = m_[(w_ - 1u) & kMask];
 
     for (std::size_t i = 0; i < n; i++)

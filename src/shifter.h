@@ -35,6 +35,9 @@ class Shifter
     void SetRatio(float r);
     /** Start cleanly from "now" (call when the effect engages). */
     void Reset();
+    /** Record the input without producing output: keeps the history current
+     *  while the shifter isn't being heard, so it can start instantly. */
+    void Feed(const float* in_l, const float* in_r, std::size_t n);
     /** Wet only. in/out may alias. */
     void Process(const float* in_l, const float* in_r, float* out_l, float* out_r, std::size_t n);
 

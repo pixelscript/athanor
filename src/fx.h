@@ -231,6 +231,9 @@ class Space
     float     xf_old_ = 18000.0f;   // previous delay time, fading out
     float     xf_ = 0.0f;           // 1 -> 0 while crossfading
     float     xf_dec_ = 0.0f;
+    float     xf_pend_ = 0.0f;      // a change that arrived mid-crossfade, applied when it ends
+    bool      xf_has_pend_ = false;
+    void      StartCrossfade(float target);
 
     Smooth rev_send_, dly_send_, dly_to_rev_, dry_, dly_fb_;
     float  t_rev_send_ = 0.0f, t_dly_send_ = 0.0f, t_dly_to_rev_ = 0.0f;
