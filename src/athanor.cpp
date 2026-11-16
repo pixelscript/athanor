@@ -36,6 +36,10 @@
  * Press B1 + B2 together to bypass all three rows (again to bring them
  * back); a gate on J7 does the same while it is high.
  *
+ * Hold B2 on its own for two seconds for the tuner: the six rings become six
+ * guitar strings, six octaves of C, or a chromatic tuner (B1 steps through
+ * them, B2 mutes, B3 leaves).
+ *
  * USB MIDI (same cable as the web programmer): MIDI clock drives the delay
  * time and LFO rates when nothing is patched to J3; CCs 20..30 play the six
  * knobs, the variants, record and bypass. See README.
@@ -74,6 +78,7 @@
 #include "modfx.h"
 #include "recorder.h"
 #include "shifter.h"
+#include "tuner.h"
 #include "stretch_engine.h"
 
 using namespace alchemy;
@@ -213,6 +218,7 @@ struct Gesture
     bool   consumed = false;  // used by a chord: no variant step on release
     float  refAmt   = 0.0f;   // knob positions at press
     float  refMod   = 0.0f;
+    uint32_t downMs = 0;      // when it went down
 };
 static Gesture gesture[3];
 
@@ -222,9 +228,29 @@ static inline float CvNorm(float knob, uint8_t pot)
 }
 
 /** An amount knob as played: knob (or MIDI) + CV, or neutral while bypassed. */
+/* ── Tuner ──────────────────────────────────────────────────────────────
+ * Hold B2 alone for two seconds (without turning a knob). While it is on,
+ * the effects are bypassed and the rings show the tuner:
+ *   C octaves  one ring per octave: C1 C2 C3 down the left, C4 C5 C6 down the right
+ *   Chromatic  top-left = which note, top-right = flat / sharp, middle-left = octave
+ *   Guitar     one ring per string: E A D down the left, G B E down the right
+ * B1 steps through the three, B2 mutes / unmutes the output, B3 (or holding
+ * B2 again) leaves. */
+static athanor::Tuner tuner;
+static volatile bool  tunerOn      = false;
+static volatile bool  tunerMute    = false;
+static uint8_t        tunerMode    = 0;        // saved
+static constexpr uint32_t kTunerHoldMs = 2000;
+static constexpr uint8_t  kBandOfPot[6] = {0, 3, 1, 4, 2, 5};   // left column low, right column high
+static constexpr Rgb      kTunerLook[athanor::Tuner::kNumModes] = {
+    {0x00, 0xC0, 0xFF},   // C octaves: cyan
+    {0xE0, 0x30, 0xFF},   // chromatic: magenta
+    {0xFF, 0x90, 0x00},   // guitar: amber
+};
+
 static inline float AmtNorm(int row)
 {
-    return bypassAll ? 0.5f : CvNorm(amtValue[row], (uint8_t)(row * 2));
+    return (bypassAll || tunerOn) ? 0.5f : CvNorm(amtValue[row], (uint8_t)(row * 2));
 }
 
 static AmountStyle amountStyle[3];
@@ -274,11 +300,101 @@ static void DrawPhysPip(LedPanel& p, uint8_t pot, const ArcGeometry& g, float ph
                     p.ScaleGlobal(Rgb{0x50, 0x50, 0x50}));
 }
 
+/** Tuner needle on one ring: noon is in tune, the ring spans -50..+50 cents
+ *  (about 8 cents per LED, blended between LEDs so smaller moves show). Green
+ *  within 3 cents, when the whole ring also glows; amber within 12; red
+ *  beyond, pinned at the end when off by more than 50. */
+static void DrawCents(LedPanel& p, uint8_t pot, const ArcGeometry& g, bool active, float cents, float level)
+{
+    const int last = (g.arc_leds > 1) ? (int)g.arc_leds - 1 : 1;
+    const int mid  = last / 2;
+    const float ac = std::fabs(cents);
+    const Rgb   col = (ac < 3.0f) ? Rgb{0x00, 0xFF, 0x30} : (ac < 12.0f ? Rgb{0xFF, 0xB0, 0x00} : Rgb{0xFF, 0x10, 0x00});
+    const float pos = (float)mid + Clamp(cents / 50.0f, -1.0f, 1.0f) * (float)mid;
+    const int   lo  = (int)std::floor(pos);
+    const float fr  = pos - (float)lo;
+    for (int i = 0; i <= last; i++)
+    {
+        Rgb c{0, 0, 0};
+        if (active)
+        {
+            float w = (i == lo) ? 1.0f - fr : ((i == lo + 1) ? fr : 0.0f);
+            if (ac < 3.0f) w = (i == mid) ? 1.0f : 0.12f;            // in tune: centre bright, ring glows
+            c = LedPanel::Scale(col, w * level);
+        }
+        if (i == mid && c.r == 0 && c.g == 0 && c.b == 0) c = Rgb{0x10, 0x10, 0x10};   // noon marker
+        p.SetRingByHour(pot, g.start_hour + (float)i * g.step_hours, p.ScaleGlobal(c));
+    }
+}
+
+static void DrawBlank(LedPanel& p, uint8_t pot, const ArcGeometry& g)
+{
+    for (uint8_t i = 0; i < g.arc_leds; i++)
+        p.SetRingByHour(pot, g.start_hour + (float)i * g.step_hours, Rgb{0, 0, 0});
+}
+
+static void DrawTuner(LedPanel& p, uint8_t pot, const ArcGeometry& g)
+{
+    using athanor::Tuner;
+    const Tuner::Mode mode = tuner.GetMode();
+    if (mode == Tuner::kGuitar)
+    {
+        const Tuner::Reading rd = tuner.Band(kBandOfPot[pot]);
+        DrawCents(p, pot, g, rd.active, rd.cents, rd.level);
+    }
+    else if (mode == Tuner::kCOctaves)
+    {
+        /* Only the fundamental's ring reads; the octaves above it would only
+         * be showing its overtones. */
+        const int  band = kBandOfPot[pot];
+        const bool mine = (tuner.Fundamental() == band);
+        const Tuner::Reading rd = tuner.Band(band);
+        DrawCents(p, pot, g, mine, rd.cents, rd.level);
+    }
+    else if (mode == Tuner::kChromatic)
+    {
+        const int last = (g.arc_leds > 1) ? (int)g.arc_leds - 1 : 1;
+        if (pot == 0)
+        {
+            /* Twelve notes, C at the left to B: naturals faint white, sharps
+             * faint blue, the note being played bright. */
+            static constexpr bool kSharp[12] = {false, true, false, true, false, false, true, false, true, false, true, false};
+            const int   note   = tuner.NoteClass();
+            const bool  intune = std::fabs(tuner.NoteCents()) < 3.0f;
+            for (int i = 0; i <= last; i++)
+            {
+                Rgb c{0, 0, 0};
+                if (i < 12)
+                {
+                    c = kSharp[i] ? Rgb{0x00, 0x06, 0x1C} : Rgb{0x14, 0x14, 0x14};
+                    if (i == note) c = intune ? Rgb{0x00, 0xFF, 0x30} : kWhite;
+                }
+                p.SetRingByHour(pot, g.start_hour + (float)i * g.step_hours, p.ScaleGlobal(c));
+            }
+        }
+        else if (pot == 1)
+            DrawCents(p, pot, g, tuner.HasNote(), tuner.NoteCents(), 1.0f);
+        else if (pot == 2)
+        {
+            /* Octave: that many LEDs from the left (octave 4 holds middle C and A440). */
+            const int oct = tuner.HasNote() ? tuner.Octave() : 0;
+            for (int i = 0; i <= last; i++)
+                p.SetRingByHour(pot, g.start_hour + (float)i * g.step_hours,
+                                p.ScaleGlobal(i < oct ? Rgb{0x00, 0x60, 0x80} : Rgb{0, 0, 0}));
+        }
+        else
+            DrawBlank(p, pot, g);
+    }
+    else
+        DrawBlank(p, pot, g);
+}
+
 /** Amount ring: dim deadband, each side tinted, lit from the edge to the pointer. */
 static void DrawAmountRing(LedPanel& p, uint8_t pot, const ArcGeometry& g,
                            float norm, uint32_t /*t_ms*/, void* ctx)
 {
     const AmountStyle& s = *static_cast<const AmountStyle*>(ctx);
+    if (tunerOn) { DrawTuner(p, pot, g); return; }
     if (editing[s.row] == (int8_t)pot) { DrawDepth(p, pot, g, cvDepth[pot]); return; }
     const uint8_t last  = (g.arc_leds > 1) ? (uint8_t)(g.arc_leds - 1) : 1u;
     const float   phys  = norm;
@@ -309,6 +425,7 @@ static void DrawModRing(LedPanel& p, uint8_t pot, const ArcGeometry& g,
                         float norm, uint32_t t_ms, void* ctx)
 {
     const ModStyle& s = *static_cast<const ModStyle*>(ctx);
+    if (tunerOn) { DrawTuner(p, pot, g); return; }
     if (editing[s.row] == (int8_t)pot) { DrawDepth(p, pot, g, cvDepth[pot]); return; }
     const uint8_t last = (g.arc_leds > 1) ? (uint8_t)(g.arc_leds - 1) : 1u;
     const float   half = 0.5f / (float)last;
@@ -431,6 +548,7 @@ static float DSY_SDRAM_BSS ageMem[2 * athanor::Age::kWowFloats];
 static float DSY_SDRAM_BSS chorusMem[2 * athanor::ChorusTrem::kFloats];
 static float DSY_SDRAM_BSS phaserMem[2 * athanor::PhaserFlanger::kFloats];
 static float DSY_SDRAM_BSS shiftMem[athanor::Shifter::kMemFloats];
+static float DSY_SDRAM_BSS tunerMem[athanor::Tuner::kMemFloats];
 
 namespace crash = athanor::crash;
 
@@ -477,7 +595,7 @@ struct SavedState
     uint8_t  version;
     uint32_t check;
     int8_t   depth[3];   // v2: CV depth per row's LEFT knob, -100..+100
-    uint8_t  pad;
+    uint8_t  tunerMode;  // v5: tuner mode (was padding)
     uint32_t check2;     // v2
     int8_t   depthR[3];  // v3: CV depth per row's RIGHT knob
     uint8_t  delayDiv;   // v4: delay subdivision index (was padding)
@@ -501,6 +619,7 @@ static uint32_t SaveCheck3(const SavedState& s)
     uint32_t h = 0x811C9DC5u;
     for (int i = 0; i < 3; i++) h = (h ^ (uint8_t)s.depthR[i]) * 16777619u;
     if (s.version >= 4) h = (h ^ s.delayDiv) * 16777619u;
+    if (s.version >= 5) h = (h ^ s.tunerMode) * 16777619u;
     return h ^ s.check2 ^ 0xA5A5A5A5u;
 }
 
@@ -515,7 +634,7 @@ static void LoadVariants()
     SavedState s;
     std::memcpy(&s, reinterpret_cast<const void*>(kSaveAddr), sizeof(s));
     if (s.magic != kSaveMagic || s.check != SaveCheck(s)) return;
-    if (s.version < 1 || s.version > 4) return;
+    if (s.version < 1 || s.version > 5) return;
     for (int r = 0; r < 3; r++)
         if (s.v[r] < kNumVariants[r]) variant[r] = s.v[r];
     if (s.version >= 2 && s.check2 == SaveCheck2(s))
@@ -528,6 +647,7 @@ static void LoadVariants()
             for (int r = 0; r < 3; r++)
                 cvDepth[kModPot[r]] = Clamp((float)s.depthR[r] / 100.0f, -1.0f, 1.0f);
             if (s.version >= 4 && s.delayDiv < kNumDelayDivs) delayDiv = s.delayDiv;
+            if (s.version >= 5 && s.tunerMode < athanor::Tuner::kNumModes) tunerMode = s.tunerMode;
         }
     }
 }
@@ -537,12 +657,13 @@ static void SaveVariants()
     SavedState s{};
     s.magic   = kSaveMagic;
     for (int r = 0; r < 3; r++) s.v[r] = panelVariant[r];
-    s.version = 4;
+    s.version = 5;
     s.check   = SaveCheck(s);
     for (int r = 0; r < 3; r++) s.depth[r] = DepthToSave(cvDepth[kAmtPot[r]]);
     s.check2  = SaveCheck2(s);
     for (int r = 0; r < 3; r++) s.depthR[r] = DepthToSave(cvDepth[kModPot[r]]);
     s.delayDiv = panelDelayDiv;
+    s.tunerMode = tunerMode;
     s.check3  = SaveCheck3(s);
     hw.seed.qspi.Erase(kSaveAddr, kSaveAddr + 4096u);
     hw.seed.qspi.Write(kSaveAddr, sizeof(s), reinterpret_cast<uint8_t*>(&s));
@@ -596,6 +717,7 @@ static athanor::TempoLock  midiLock;
  *   CC 29      record: 64+ start, below 64 stop
  *   CC 30      bypass all: 64+ bypassed, below 64 active
  *   CC 31      delay subdivision: the range split into eight, 1/2 ... 1/16
+ *   CC 32      tuner: 64+ on, below 64 off
  * A knob set by CC holds that value until the physical knob is turned to it
  * (the same pickup as after a depth edit), so nothing jumps. */
 static constexpr uint8_t kCcKnob0   = 20;
@@ -603,6 +725,7 @@ static constexpr uint8_t kCcVariant = 26;
 static constexpr uint8_t kCcRecord  = 29;
 static constexpr uint8_t kCcBypass  = 30;
 static constexpr uint8_t kCcDelayDiv = 31;
+static constexpr uint8_t kCcTuner    = 32;
 
 static midi::DaisyUsbPort<> midiPort;
 static TickTimebase         midiTime;
@@ -611,6 +734,18 @@ static bool                 midiReady = false;
 static uint32_t             midiNowMs = 0;
 
 static void ApplyLooks();
+
+static void SetTuner(bool on)
+{
+    if (on == tunerOn) return;
+    if (on)
+    {
+        tuner.SetMode((athanor::Tuner::Mode)tunerMode);
+        tunerMute = false;
+    }
+    tunerOn = on;
+    debug.Info(on ? "Tuner on" : "Tuner off");
+}
 
 static bool OnMidiEvent(const midi::Event& e)
 {
@@ -645,6 +780,8 @@ static bool OnMidiEvent(const midi::Event& e)
             }
             else if (cc == kCcBypass)
                 bypassLatch = (v >= 64);
+            else if (cc == kCcTuner)
+                SetTuner(v >= 64);
             else if (cc == kCcDelayDiv)
             {
                 const uint8_t n = (uint8_t)((v * kNumDelayDivs) / 128u);
@@ -688,12 +825,13 @@ static void OnPoll(uint32_t t_ms)
             gs.down      = true;
             gs.target    = -1;
             gs.consumed  = false;
+            gs.downMs    = t_ms;
             gs.refAmt    = ka;
             gs.refMod    = km;
             if (!catching[pa]) heldVal[pa] = amtValue[b];
             if (!catching[pm]) heldVal[pm] = modValue[b];
         }
-        if (gs.down && gs.target < 0 && !gs.consumed)
+        if (gs.down && gs.target < 0 && !gs.consumed && !tunerOn)   // (no depth editing in the tuner)
         {
             if (std::fabs(km - gs.refMod) > 0.02f)      gs.target = (int8_t)pm;
             else if (std::fabs(ka - gs.refAmt) > 0.02f) gs.target = (int8_t)pa;
@@ -718,6 +856,18 @@ static void OnPoll(uint32_t t_ms)
                 catching[gs.target] = true;
                 dirtyMs = t_ms ? t_ms : 1u;
             }
+            else if (!gs.consumed && tunerOn)
+            {
+                /* Tuner: B1 next mode, B2 mute, B3 leave. */
+                if (b == 0)
+                {
+                    tunerMode = (uint8_t)((tunerMode + 1u) % athanor::Tuner::kNumModes);
+                    tuner.SetMode((athanor::Tuner::Mode)tunerMode);
+                    dirtyMs = t_ms ? t_ms : 1u;
+                }
+                else if (b == 1) tunerMute = !tunerMute;
+                else             SetTuner(false);
+            }
             else if (!gs.consumed)
             {
                 variant[b] = (uint8_t)((variant[b] + 1u) % kNumVariants[b]);
@@ -736,6 +886,18 @@ static void OnPoll(uint32_t t_ms)
         if (editing[b] != (int8_t)pm && catching[pm] && std::fabs(km - heldVal[pm]) < 0.025f) catching[pm] = false;
     }
 
+    /* B2 held on its own for two seconds, nothing turned: tuner on / off. */
+    {
+        Gesture& g2 = gesture[1];
+        if (g2.down && !g2.consumed && g2.target < 0 && !gesture[0].down && !gesture[2].down
+            && (t_ms - g2.downMs) >= kTunerHoldMs)
+        {
+            g2.consumed = true;              // releasing it does nothing more
+            SetTuner(!tunerOn);
+        }
+    }
+    if (tunerOn) tuner.Poll();
+
     /* Two-button actions fire each time the pair becomes pressed together, so
      * you can keep one button held and tap the other to repeat the action
      * (a button that took part in one never steps its variant on release).
@@ -746,7 +908,7 @@ static void OnPoll(uint32_t t_ms)
         Gesture& g1 = gesture[0];
         Gesture& g2 = gesture[1];
         static bool chordHeld = false;
-        const bool both = g1.down && g2.down && g1.target < 0 && g2.target < 0 && !gesture[2].down;
+        const bool both = !tunerOn && g1.down && g2.down && g1.target < 0 && g2.target < 0 && !gesture[2].down;
         if (both)
         {
             g1.consumed = g2.consumed = true;
@@ -767,7 +929,7 @@ static void OnPoll(uint32_t t_ms)
         Gesture& g2 = gesture[1];
         Gesture& g3 = gesture[2];
         static bool chordHeld = false;
-        const bool both = g2.down && g3.down && g2.target < 0 && g3.target < 0 && !gesture[0].down;
+        const bool both = !tunerOn && g2.down && g3.down && g2.target < 0 && g3.target < 0 && !gesture[0].down;
         if (both)
         {
             g2.consumed = g3.consumed = true;
@@ -989,6 +1151,13 @@ static void OnRender(uint32_t /*t_ms*/)
             if (overrunMs != 0 && (now - overrunMs) < 2000u) c = Rgb{0xFF, 0x00, 0x00};
         }
         if (bypassAll) c = Rgb{0x30, 0x30, 0x30};   // all rows bypassed: buttons go dim white
+        if (tunerOn)
+        {
+            /* B1 = tuner mode colour, B2 = red when muted, B3 = the way out. */
+            if (b == 0)      c = LedPanel::Scale(kTunerLook[tunerMode < athanor::Tuner::kNumModes ? tunerMode : 0], 0.6f);
+            else if (b == 1) c = tunerMute ? Rgb{0xFF, 0x00, 0x00} : Rgb{0x18, 0x18, 0x18};
+            else             c = Rgb{0x30, 0x30, 0x30};
+        }
         if (flashing) c = flash;
         hw.leds.SetButtonPair((uint8_t)b, hw.leds.ScaleGlobal(c));
     }
@@ -1219,6 +1388,26 @@ static void AudioCallback(daisy::AudioHandle::InputBuffer  in,
     {
         limiter.Process(bl[i], br[i]);
     }
+
+    /* Tuner: listens to the input; optionally mutes the output (5 ms fade). */
+    {
+        const bool on = tunerOn;
+        if (on) tuner.Push(in[0], in[1], n);
+        static float muteGain = 1.0f;
+        const float  want = (on && tunerMute) ? 0.0f : 1.0f;
+        if (muteGain != want || want < 1.0f)
+        {
+            const float from = muteGain;
+            muteGain += Clamp(want - muteGain, -0.25f, 0.25f);      // there in four blocks
+            const float step = (muteGain - from) / (float)n;
+            for (size_t i = 0; i < n; i++)
+            {
+                const float gm = from + step * (float)(i + 1);
+                bl[i] *= gm;
+                br[i] *= gm;
+            }
+        }
+    }
     recorder.Push(bl, br, n);   // final output -> SD ring (no-op when idle)
 
     crash::Mark(healthy ? (uint32_t)crash::kRunning : (uint32_t)crash::kFirstTick);
@@ -1317,6 +1506,7 @@ int main()
     crash::Mark(crash::kChorusInit);
     phaserFlanger.Init(sr, phaserMem);
     shifter.Init(sr, shiftMem);
+    tuner.Init(sr, tunerMem);
     crash::Mark(crash::kPhaserInit);
 
     /* Per-block smoothers (64-sample blocks ~ 1.33 ms). */

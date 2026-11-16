@@ -225,6 +225,36 @@ row's current variant colour. B3 doubles as a CPU meter and overrides its colour
 
 The first 3 seconds after boot are ignored.
 
+## Tuner
+
+**Hold B2 on its own for two seconds** (without turning a knob) to switch the six rings to a tuner.
+The effects are bypassed while it is on. Inside the tuner:
+
+- **B1** steps through the three modes in the order below (its colour shows which); the choice is
+  saved.
+- **B2** mutes or unmutes the output (red when muted).
+- **B3** leaves the tuner. Holding B2 for two seconds again also leaves.
+
+On every ring, **noon is in tune**. The ring spans 50 cents flat (left) to 50 cents sharp (right),
+about 8 cents per LED, blended between LEDs so smaller movements show. The needle is green within
+3 cents (and the whole ring glows), amber within 12, red beyond, and sits at the end of the ring
+when a note is more than 50 cents out.
+
+| Mode (B1 colour) | What the rings show |
+|---|---|
+| **C octaves** (cyan) | For tuning oscillators to C. One ring per octave: C1 C2 C3 down the left, C4 C5 C6 down the right. The ring for the octave your oscillator is in lights up; it hears a C that is up to about a tone and a half out, so you can find it from a distance. |
+| **Chromatic** (magenta) | Any single note from about 30 Hz to 2 kHz (C1 to C7). Top-left ring: which of the 12 notes, C at the left to B at the right (naturals faint white, sharps faint blue, yours bright). Top-right ring: flat / sharp. Middle-left ring: the octave, as that many LEDs (four LEDs = the octave of middle C and A440). |
+| **Guitar** (amber) | One ring per string, all at once: E A D down the left column, G B E down the right. Strum, and every string that is ringing shows how flat or sharp it is. Standard tuning, A = 440 Hz. |
+
+- In **C octaves**, only the lowest ring that hears something lights: the higher ones would only be
+  showing your oscillator's overtones.
+- In **Guitar**, the low strings' overtones sit almost on top of the B and high E strings' notes. In
+  the tests this pulls a strummed B or high E reading by 1 to 2 cents at worst, so strum to see which
+  strings are out and pluck a string on its own for the last cent.
+- A guitar plugged straight into a Eurorack input is very quiet. The tuner reads down to roughly
+  -65 dB, but a preamp or instrument input in front makes it steadier.
+- In **Chromatic**, very bright waveforms above about 2 kHz can read an octave low.
+
 ## Two-button presses
 
 Three actions use two buttons at once: **B1 + B2** bypass all, **B2 + B3** delay subdivision, and
@@ -297,6 +327,7 @@ doesn't lurch.
 | 29 | Record | 64 and up starts, below 64 stops |
 | 30 | Bypass all | 64 and up bypassed, below 64 active |
 | 31 | Delay subdivision | the range split into eight: 0 to 15 is 1/2, 16 to 31 dotted 1/4, 32 to 47 1/4, 48 to 63 dotted 1/8, 64 to 79 1/4 triplet, 80 to 95 1/8, 96 to 111 1/8 triplet, 112 to 127 1/16 |
+| 32 | Tuner | 64 and up on, below 64 off |
 
 - A knob set by CC **holds that value until you turn the physical knob to it** (a dim pip shows where
   the knob is), the same pickup used after setting a CV depth. Nothing jumps when you grab a knob.
@@ -450,6 +481,8 @@ works for later updates without the button dance.
 - `pitch_probe`: speed tracking and reel overshoot.
 - `shift_probe`: the Interval shifter: each step in tune, the delay against the input, and how
   cleanly a held chord comes through (runs in `make test`).
+- `tuner_probe`: the tuner: right ring / right note, and reading accuracy for oscillators, single
+  strings and strums (runs in `make test`).
 - `drive_probe`: every drive level, flavour and amount comes out as loud as the input, still
   distorted, with no jump when slammed on (runs in `make test`).
 - `div_probe`: a delay subdivision change crossfades without a click or pitch swoop (runs in
