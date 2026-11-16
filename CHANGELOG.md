@@ -4,6 +4,14 @@ All notable changes to Athanor. Versions follow [semver](https://semver.org) and
 [release-please](https://github.com/googleapis/release-please) from Conventional Commit messages.
 The version in `version.txt` is stamped into the HostLink identity at build time.
 
+## [0.6.0](https://github.com/pixelscript/athanor/compare/v0.5.0...v0.6.0) (2026-11-16)
+
+
+### Features
+
+* tuner ([9d2803e](https://github.com/pixelscript/athanor/commit/9d2803e756ee688678cc3a60f0a578fae51edb75))
+* tuner ([d7e0cc5](https://github.com/pixelscript/athanor/commit/d7e0cc5be08f4deffa38b25c2ffb4f511ee90b74))
+
 ## [0.5.0](https://github.com/pixelscript/athanor/compare/v0.4.0...v0.5.0) (2026-11-13)
 
 
