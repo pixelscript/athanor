@@ -28,6 +28,7 @@ CPP_SOURCES = \
     src/modfx.cpp \
     src/recorder.cpp \
     src/shifter.cpp \
+    src/tuner.cpp \
     src/crashlog.cpp
 
 # ── Alchemy SDK, compiled straight from the submodule ───────────────────────
@@ -90,6 +91,8 @@ test:
 	./build/host_test
 	$(HOST_CXX) -O2 -std=c++17 -Isrc tests/shift_probe.cpp src/shifter.cpp -o build/shift_probe
 	./build/shift_probe
+	$(HOST_CXX) -O2 -std=c++17 -Isrc tests/tuner_probe.cpp src/tuner.cpp -o build/tuner_probe
+	./build/tuner_probe
 	$(HOST_CXX) -O2 -std=c++17 -Isrc tests/drive_probe.cpp src/drive.cpp src/fx.cpp -o build/drive_probe
 	./build/drive_probe
 	$(HOST_CXX) -O2 -std=c++17 -Isrc tests/div_probe.cpp src/fx.cpp -o build/div_probe
